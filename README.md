@@ -132,11 +132,13 @@ source .env
 
 **Доступные метрики (`--metrics`, только для `trend`):**
 
-| Метрика | Описание |
-|---|---|
-| `cycle_time` | Медианное время PR от создания до закрытия (часы) |
-| `acceptance_rate` | MERGED / (MERGED + DECLINED) × 100% |
-| `throughput` | Количество смерженных PR за период |
+| Метрика | Y-ось | Описание |
+|---|---|---|
+| `cycle_time` | лог | Медианное время PR от создания до закрытия (часы) |
+| `acceptance_rate` | линейная | MERGED / (MERGED + DECLINED) × 100% |
+| `throughput` | линейная | Количество смерженных PR за период |
+| `total_prs` | линейная | Всего PR (MERGED + DECLINED) за период |
+| `time_to_first_comment` | лог | Медианное время до первого комментария от не-автора (часы) |
 
 Метрики можно комбинировать через запятую.
 
@@ -169,13 +171,21 @@ source .env
   --metrics cycle_time,acceptance_rate \
   --layout overlay --output output/overlay.png
 
-# Эффект AI-агента: split на два когорта по наличию ревьювера
+# Эффект AI-агента: split по формальному ревьюверу
 .venv/bin/python pr_analytics.py plot \
   --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
   --type trend --period month \
-  --metrics cycle_time,acceptance_rate \
+  --metrics cycle_time,acceptance_rate,time_to_first_comment \
   --split reviewer:ai-review-bot \
-  --layout stack --output output/ai_effect.png
+  --layout stack --output output/ai_effect.html
+
+# Эффект AI-агента: split по наличию хотя бы одного комментария
+.venv/bin/python pr_analytics.py plot \
+  --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
+  --type trend --period week \
+  --metrics cycle_time,total_prs \
+  --split commenter:ai-review-bot \
+  --layout stack --output output/ai_effect.html
 
 # Сырые точки для отладки
 .venv/bin/python pr_analytics.py plot \
@@ -193,13 +203,16 @@ source .env
 | `--metrics` | Comma-separated метрики для trend (default: `cycle_time`) |
 | `--period` | `month` (по умолчанию) или `week` — для trend |
 | `--layout` | `stack` (subplot'ы, по умолчанию) или `overlay` (dual y-axis, только 2 метрики) |
-| `--split` | `reviewer:<slug>` — разделить на два когорта по наличию ревьювера |
+| `--split` | `reviewer:<slug>` или `commenter:<slug>` — разделить на два когорта |
 | `--reviewer` | `include:<slug>` или `exclude:<slug>` — фильтр датасета (не разбивает) |
-| `--output` | `.png` или `.svg` |
+| `--output` | `.png`, `.svg` или `.html` (интерактивный plotly, для `trend`) |
 
-**Про `--split`:** все репозитории агрегируются в два когорта — PR где указанный аккаунт был ревьювером и PR где его не было. На графике — две линии на каждой метрике. Основной сценарий: показать влияние AI-агента код-ревью на метрики процесса.
+**Про `--split`:** все репозитории агрегируются в два когорта — с участием аккаунта и без. На графике — две линии на каждой метрике. Основной сценарий: показать влияние AI-агента код-ревью на метрики процесса.
 
-Cycle Time = `closed_date − created_date` в часах. Все trend-метрики группируются по `closed_date`.
+- `reviewer:<slug>` — аккаунт в формальном списке ревьюверов PR
+- `commenter:<slug>` — аккаунт оставил хотя бы один комментарий (не обязательно в ревьюверах)
+
+Cycle Time и Time to First Comment используют **логарифмическую** ось Y. Все trend-метрики группируются по `closed_date`.
 
 **Добавить новую метрику** (DORA, PDLC и др.): написать функцию `(rows, period, state) -> dict[str, float]` и добавить запись в `METRICS` в `pa/metrics.py`. Рендер-слой менять не нужно.
 
