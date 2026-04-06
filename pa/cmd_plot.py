@@ -240,9 +240,13 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         repo_id = repo_row["id"]
 
         query = """
-            SELECT created_date, closed_date, state, reviewers
-            FROM pull_requests
-            WHERE repo_id=? AND closed_date IS NOT NULL
+            SELECT pr.created_date, pr.closed_date, pr.state, pr.reviewers,
+                   MIN(CASE WHEN c.author != pr.author THEN c.created_date END)
+                       AS first_comment_date
+            FROM pull_requests pr
+            LEFT JOIN pr_comments c ON c.repo_id = pr.repo_id AND c.pr_id = pr.pr_id
+            WHERE pr.repo_id=? AND pr.closed_date IS NOT NULL
+            GROUP BY pr.rowid
         """
         params: list[Any] = [repo_id]
         if since_ts:

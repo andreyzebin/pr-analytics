@@ -74,6 +74,26 @@ def _throughput(rows, period: str, state: str) -> dict[str, float]:
     return dict(buckets)
 
 
+def _time_to_first_comment(rows, period: str, state: str) -> dict[str, float]:
+    """Median hours from PR creation to first non-author comment, bucketed by closed_date.
+
+    PRs with no reviewer comments are excluded from the median.
+    Requires first_comment_date field in rows (populated via LEFT JOIN in cmd_plot).
+    """
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for r in rows:
+        if r["state"] != state or not r["closed_date"]:
+            continue
+        fcd = r["first_comment_date"] if "first_comment_date" in r.keys() else None
+        if not fcd or not r["created_date"]:
+            continue
+        hours = (fcd - r["created_date"]) / 3_600_000
+        if hours < 0:
+            continue  # data anomaly: comment before PR creation
+        buckets[bucket_key(r["closed_date"], period)].append(hours)
+    return {bk: statistics.median(v) for bk, v in buckets.items()}
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 METRICS: dict[str, MetricDef] = {
@@ -88,5 +108,9 @@ METRICS: dict[str, MetricDef] = {
     "throughput": MetricDef(
         label="Throughput", unit="PRs merged", plot_kind="bar",
         compute=_throughput, fmt=lambda v: str(int(v)),
+    ),
+    "time_to_first_comment": MetricDef(
+        label="Time to First Review Comment", unit="hours", plot_kind="line",
+        compute=_time_to_first_comment, fmt=fmt_hours,
     ),
 }
