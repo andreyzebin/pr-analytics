@@ -185,6 +185,8 @@ def _save_trend_html(
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
+    # Force correct x-axis order — plotly otherwise sorts categories by first appearance
+    fig.update_xaxes(categoryorder="array", categoryarray=sorted_buckets)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(out_path))
     return True
