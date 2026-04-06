@@ -37,6 +37,8 @@ class MetricDef:
     compute: Callable  # (rows, period, state) -> dict[str, float]
     fmt: Callable      # (value) -> annotation string
     log_scale: bool = False  # logarithmic Y-axis
+    row_value: Callable | None = None  # (row, state) -> float | None
+                                       # Non-None = per-PR metric; None = aggregated only
 
 
 # ── compute functions ─────────────────────────────────────────────────────────
@@ -110,6 +112,11 @@ METRICS: dict[str, MetricDef] = {
     "cycle_time": MetricDef(
         label="Median Cycle Time", unit="hours", plot_kind="line",
         compute=_cycle_time, fmt=fmt_hours, log_scale=True,
+        row_value=lambda r, state: (
+            (r["closed_date"] - r["created_date"]) / 3_600_000
+            if r.get("state") == state and r.get("closed_date") and r.get("created_date")
+            else None
+        ),
     ),
     "acceptance_rate": MetricDef(
         label="Acceptance Rate", unit="%", plot_kind="line",
@@ -126,5 +133,11 @@ METRICS: dict[str, MetricDef] = {
     "time_to_first_comment": MetricDef(
         label="Time to First Review Comment", unit="hours", plot_kind="line",
         compute=_time_to_first_comment, fmt=fmt_hours, log_scale=True,
+        row_value=lambda r, state: (
+            (r["first_comment_date"] - r["created_date"]) / 3_600_000
+            if r.get("state") == state and r.get("first_comment_date")
+               and r.get("created_date") and r["first_comment_date"] >= r["created_date"]
+            else None
+        ),
     ),
 }

@@ -327,36 +327,61 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
     # ── points ────────────────────────────────────────────────────────────────
     if plot_type == "points":
-        # repo_id -> "PROJ/repo" label (built from raw_per_repo rows)
+        # repo_id -> "PROJ/repo" label
         repo_id_to_label: dict[int, str] = {}
         for lbl, rows_list in raw_per_repo.items():
             for r in rows_list:
                 repo_id_to_label[r["repo_id"]] = lbl
 
+        per_pr_metrics  = [m for m in requested_metrics if METRICS[m].row_value is not None]
+        aggregated_metrics = [m for m in requested_metrics if METRICS[m].row_value is None]
+
         for series in series_list:
-            pts = sorted(
-                (
-                    r["closed_date"],
-                    r["repo_id"],
-                    r["pr_id"],
-                    (r["closed_date"] - r["created_date"]) / 3_600_000,
+            print(f"\n{'─' * 60}")
+            print(f"{series.label}")
+
+            # ── per-PR metrics: one block per metric ──────────────────────
+            for mname in per_pr_metrics:
+                mdef = METRICS[mname]
+                pts = sorted(
+                    (r["closed_date"], r["repo_id"], r["pr_id"], mdef.row_value(r, state))
+                    for r in series.rows
+                    if mdef.row_value(r, state) is not None
                 )
-                for r in series.rows
-                if r["state"] == state and r["closed_date"] and r["created_date"]
-            )
-            if not pts:
-                print(f"\n{series.label}  (no data for state={state})")
-                continue
-            times = [t for _, _, _, t in pts]
-            med = statistics.median(times)
-            print(f"\n{series.label}  (n={len(pts)}, median={fmt_hours(med)})")
-            col_w = max(len(f"{repo_id_to_label.get(rid, '')}#{pid}") for _, rid, pid, _ in pts)
-            for closed_ms, repo_id, pr_id, t in pts:
-                date_str = ms_to_date(closed_ms)
-                repo_label = repo_id_to_label.get(repo_id, str(repo_id))
-                ref = f"{repo_label}#{pr_id}"
-                tag = "  ← median" if t == med else ""
-                print(f"  {date_str}  {ref:<{col_w}}  {fmt_hours(t):>8}{tag}")
+                if not pts:
+                    print(f"\n  [{mname}]  no data")
+                    continue
+                values = [v for _, _, _, v in pts]
+                med = statistics.median(values)
+                print(f"\n  [{mname}]  n={len(pts)}, median={mdef.fmt(med)}")
+                col_w = max(len(f"{repo_id_to_label.get(rid, rid)}#{pid}") for _, rid, pid, _ in pts)
+                for closed_ms, repo_id, pr_id, v in pts:
+                    ref = f"{repo_id_to_label.get(repo_id, str(repo_id))}#{pr_id}"
+                    tag = "  ← median" if v == med else ""
+                    print(f"  {ms_to_date(closed_ms)}  {ref:<{col_w}}  {mdef.fmt(v):>8}{tag}")
+
+            # ── aggregated metrics: one combined period table ─────────────
+            if aggregated_metrics:
+                all_buckets: set[str] = set()
+                agg_data: dict[str, dict[str, float]] = {}
+                for mname in aggregated_metrics:
+                    buckets = METRICS[mname].compute(series.rows, period, state)
+                    agg_data[mname] = buckets
+                    all_buckets.update(buckets.keys())
+
+                period_label = "week" if period == "week" else "month"
+                print(f"\n  [{', '.join(aggregated_metrics)}]  by {period_label}")
+                col_w2 = max((len(METRICS[m].label) for m in aggregated_metrics), default=8)
+                header = f"  {'period':<12}" + "".join(f"  {METRICS[m].label:>{col_w2}}" for m in aggregated_metrics)
+                print(header)
+                for bk in sorted(all_buckets):
+                    row_str = f"  {bk:<12}"
+                    for mname in aggregated_metrics:
+                        v = agg_data[mname].get(bk)
+                        val_str = METRICS[mname].fmt(v) if v is not None else "-"
+                        row_str += f"  {val_str:>{col_w2}}"
+                    print(row_str)
+
         return
 
     # ── box ───────────────────────────────────────────────────────────────────
