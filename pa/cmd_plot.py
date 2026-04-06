@@ -91,12 +91,103 @@ def _save(fig, output: str) -> None:
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.suffix.lower() == ".html":
-        log.warning("HTML output not supported for this chart configuration; saving as PNG.")
+        log.warning("HTML output not supported for box/points; saving as PNG.")
         out_path = out_path.with_suffix(".png")
     fig.savefig(str(out_path), dpi=150)
     import matplotlib.pyplot as plt
     plt.close(fig)
     print(f"Chart saved to {out_path}", flush=True)
+
+
+def _save_trend_html(
+    out_path: Path,
+    metric_results: dict[str, list[tuple[str, dict]]],
+    sorted_buckets: list[str],
+    requested_metrics: list[str],
+    layout: str,
+    period_label: str,
+    state: str,
+) -> bool:
+    """Render trend chart as interactive HTML via plotly. Returns True on success."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        return False
+
+    n = len(requested_metrics)
+    # Plotly colors (same order as matplotlib default cycle)
+    COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+              "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+
+    if n == 1 or layout == "stack":
+        specs = [[{"secondary_y": False}]] * n
+        subplot_titles = [METRICS[m].label for m in requested_metrics]
+        fig = make_subplots(rows=n, cols=1, shared_xaxes=True,
+                            subplot_titles=subplot_titles, specs=specs,
+                            vertical_spacing=0.08)
+        for row_idx, mname in enumerate(requested_metrics, 1):
+            mdef = METRICS[mname]
+            show_legend = (row_idx == 1)
+            for s_idx, (label, buckets) in enumerate(metric_results[mname]):
+                xs = [bk for bk in sorted_buckets if bk in buckets]
+                ys = [buckets[bk] for bk in xs]
+                color = COLORS[s_idx % len(COLORS)]
+                trace_label = label if show_legend else label
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs, y=ys, name=trace_label,
+                        mode="lines+markers",
+                        line=dict(color=color),
+                        marker=dict(color=color),
+                        text=[mdef.fmt(y) for y in ys],
+                        hovertemplate="%{x}<br>%{text}<extra>" + label + "</extra>",
+                        legendgroup=label,
+                        showlegend=show_legend,
+                    ),
+                    row=row_idx, col=1,
+                )
+            fig.update_yaxes(title_text=f"{mdef.label} ({mdef.unit})", row=row_idx, col=1)
+
+    else:  # overlay — dual y-axis
+        assert n == 2
+        mname0, mname1 = requested_metrics[0], requested_metrics[1]
+        mdef0, mdef1 = METRICS[mname0], METRICS[mname1]
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        for s_idx, (label, buckets) in enumerate(metric_results[mname0]):
+            xs = [bk for bk in sorted_buckets if bk in buckets]
+            ys = [buckets[bk] for bk in xs]
+            color = COLORS[s_idx % len(COLORS)]
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, name=f"{label}",
+                mode="lines+markers", line=dict(color=color),
+                text=[mdef0.fmt(y) for y in ys],
+                hovertemplate="%{x}<br>%{text}<extra>" + label + " — " + mdef0.label + "</extra>",
+                legendgroup=label,
+            ), secondary_y=False)
+        for s_idx, (label, buckets) in enumerate(metric_results[mname1]):
+            xs = [bk for bk in sorted_buckets if bk in buckets]
+            ys = [buckets[bk] for bk in xs]
+            color = COLORS[s_idx % len(COLORS)]
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, name=f"{label} ({mdef1.label})",
+                mode="lines+markers", line=dict(color=color, dash="dash"),
+                text=[mdef1.fmt(y) for y in ys],
+                hovertemplate="%{x}<br>%{text}<extra>" + label + " — " + mdef1.label + "</extra>",
+                legendgroup=label, showlegend=True,
+            ), secondary_y=True)
+        fig.update_yaxes(title_text=f"{mdef0.label} ({mdef0.unit})", secondary_y=False)
+        fig.update_yaxes(title_text=f"{mdef1.label} ({mdef1.unit})", secondary_y=True)
+
+    title = " + ".join(METRICS[m].label for m in requested_metrics)
+    fig.update_layout(
+        title=f"{title} by {period_label} ({state})",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.write_html(str(out_path))
+    return True
 
 
 # ── Main command ──────────────────────────────────────────────────────────────
@@ -330,5 +421,16 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         title = " + ".join(METRICS[m].label for m in requested_metrics)
         axes[0].set_title(f"{title} by {period_label} ({state})")
         plt.tight_layout()
+
+    out_path = Path(output)
+    if out_path.suffix.lower() == ".html":
+        ok = _save_trend_html(out_path, metric_results, sorted_buckets,
+                              requested_metrics, layout, period_label, state)
+        if ok:
+            plt.close(fig)
+            print(f"Chart saved to {out_path}", flush=True)
+            return
+        log.warning("plotly not installed, saving as PNG instead.")
+        output = str(out_path.with_suffix(".png"))
 
     _save(fig, output)
