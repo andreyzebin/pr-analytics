@@ -250,10 +250,10 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         """
         params: list[Any] = [repo_id]
         if since_ts:
-            query += " AND created_date >= ?"
+            query += " AND pr.created_date >= ?"
             params.append(since_ts)
         if until_ts:
-            query += " AND created_date <= ?"
+            query += " AND pr.created_date <= ?"
             params.append(until_ts)
 
         rows = conn.execute(query, params).fetchall()
