@@ -1,0 +1,92 @@
+"""
+Metric registry for trend charts.
+
+Adding a new metric:
+  1. Write a compute function: (rows, period, state) -> dict[bucket_str, float]
+     - rows: list of sqlite3.Row with fields created_date, closed_date, state, reviewers
+     - period: "week" | "month"
+     - state: the --state CLI arg (used by metrics that care about it)
+  2. Add a MetricDef entry to METRICS.
+
+The render layer in cmd_plot.py is metric-agnostic — it only uses
+MetricDef.label, unit, plot_kind, compute, and fmt.
+"""
+from __future__ import annotations
+
+import statistics
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Callable
+
+
+def bucket_key(ts_ms: int, period: str) -> str:
+    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+    return dt.strftime("%G-W%V") if period == "week" else dt.strftime("%Y-%m")
+
+
+def fmt_hours(hours: float) -> str:
+    return f"{hours * 60:.0f}m" if hours < 1 else f"{hours:.1f}h"
+
+
+@dataclass
+class MetricDef:
+    label: str       # Y-axis label
+    unit: str        # displayed in parentheses after label
+    plot_kind: str   # "line" | "bar"
+    compute: Callable  # (rows, period, state) -> dict[str, float]
+    fmt: Callable      # (value) -> annotation string
+
+
+# ── compute functions ─────────────────────────────────────────────────────────
+
+def _cycle_time(rows, period: str, state: str) -> dict[str, float]:
+    """Median cycle time in hours, bucketed by closed_date."""
+    buckets: dict[str, list[float]] = defaultdict(list)
+    for r in rows:
+        if r["state"] != state or not r["closed_date"] or not r["created_date"]:
+            continue
+        ct = (r["closed_date"] - r["created_date"]) / 3_600_000
+        buckets[bucket_key(r["closed_date"], period)].append(ct)
+    return {bk: statistics.median(v) for bk, v in buckets.items()}
+
+
+def _acceptance_rate(rows, period: str, state: str) -> dict[str, float]:
+    """MERGED / (MERGED + DECLINED) × 100, bucketed by closed_date."""
+    merged: dict[str, int] = defaultdict(int)
+    total: dict[str, int] = defaultdict(int)
+    for r in rows:
+        if r["state"] not in ("MERGED", "DECLINED") or not r["closed_date"]:
+            continue
+        bk = bucket_key(r["closed_date"], period)
+        total[bk] += 1
+        if r["state"] == "MERGED":
+            merged[bk] += 1
+    return {bk: merged[bk] / total[bk] * 100 for bk in total}
+
+
+def _throughput(rows, period: str, state: str) -> dict[str, float]:
+    """Count of MERGED PRs per period, bucketed by closed_date."""
+    buckets: dict[str, int] = defaultdict(int)
+    for r in rows:
+        if r["state"] == "MERGED" and r["closed_date"]:
+            buckets[bucket_key(r["closed_date"], period)] += 1
+    return dict(buckets)
+
+
+# ── registry ──────────────────────────────────────────────────────────────────
+
+METRICS: dict[str, MetricDef] = {
+    "cycle_time": MetricDef(
+        label="Median Cycle Time", unit="hours", plot_kind="line",
+        compute=_cycle_time, fmt=fmt_hours,
+    ),
+    "acceptance_rate": MetricDef(
+        label="Acceptance Rate", unit="%", plot_kind="line",
+        compute=_acceptance_rate, fmt=lambda v: f"{v:.0f}%",
+    ),
+    "throughput": MetricDef(
+        label="Throughput", unit="PRs merged", plot_kind="bar",
+        compute=_throughput, fmt=lambda v: str(int(v)),
+    ),
+}

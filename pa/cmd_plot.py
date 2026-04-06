@@ -5,33 +5,101 @@ import json
 import logging
 import statistics
 import sys
-from collections import defaultdict
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pa.config import resolve_db
 from pa.db import open_db
+from pa.metrics import METRICS, MetricDef, fmt_hours
 from pa.utils import collect_repos_from_args, date_to_ms
 
 log = logging.getLogger(__name__)
 
 
-def _bucket_key(closed_ms: int, period: str) -> str:
-    """Return ISO period label for a closed_date timestamp."""
-    dt = datetime.fromtimestamp(closed_ms / 1000, tz=timezone.utc)
-    if period == "week":
-        # ISO week: 2026-W03
-        return dt.strftime("%G-W%V")
-    else:
-        return dt.strftime("%Y-%m")
+# ── Series ────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Series:
+    """A named subset of PR rows that renders as one line/box on the chart."""
+    label: str
+    rows: list = field(default_factory=list)
 
 
-def _fmt_h(hours: float) -> str:
-    if hours < 1:
-        return f"{hours * 60:.0f}m"
-    return f"{hours:.1f}h"
+def _build_series(raw_per_repo: dict[str, list], split_arg: str | None) -> list[Series]:
+    """
+    Default: one Series per repo.
+    --split reviewer:<slug>: aggregate all repos, split into two series
+      by presence/absence of <slug> in the reviewers list.
+    """
+    if split_arg is None:
+        return [Series(label=lbl, rows=rows) for lbl, rows in raw_per_repo.items()]
 
+    kind, value = split_arg.split(":", 1)
+    if kind != "reviewer":
+        log.error("Unsupported --split kind %r. Currently supported: reviewer:<slug>", kind)
+        sys.exit(1)
+
+    slug = value
+    all_rows = [r for rows in raw_per_repo.values() for r in rows]
+    with_rows    = [r for r in all_rows if slug in json.loads(r["reviewers"] or "[]")]
+    without_rows = [r for r in all_rows if slug not in json.loads(r["reviewers"] or "[]")]
+    return [
+        Series(label=f"+ {slug}", rows=with_rows),
+        Series(label=f"- {slug}", rows=without_rows),
+    ]
+
+
+# ── Trend rendering ───────────────────────────────────────────────────────────
+
+def _draw_trend_ax(
+    ax,
+    series_data: list[tuple[str, dict[str, float]]],
+    sorted_buckets: list[str],
+    mdef: MetricDef,
+    colors: list[str],
+    linestyles: list[str] | None = None,
+) -> None:
+    """Draw one metric on one axes. series_data = [(label, {bucket: value})]."""
+    for idx, (label, buckets) in enumerate(series_data):
+        color = colors[idx % len(colors)]
+        ls = linestyles[idx % len(linestyles)] if linestyles else "-"
+
+        x_pos = [i for i, bk in enumerate(sorted_buckets) if bk in buckets]
+        y_vals = [buckets[bk] for bk in sorted_buckets if bk in buckets]
+        if not x_pos:
+            continue
+
+        if mdef.plot_kind == "bar":
+            n = len(series_data)
+            w = 0.7 / max(n, 1)
+            offset = (idx - n / 2 + 0.5) * w
+            ax.bar([x + offset for x in x_pos], y_vals,
+                   width=w, color=color, alpha=0.7, label=label)
+        else:
+            ax.plot(x_pos, y_vals, marker="o", label=label,
+                    color=color, linewidth=1.5, linestyle=ls)
+            for x, y in zip(x_pos, y_vals):
+                ax.annotate(mdef.fmt(y), xy=(x, y),
+                            xytext=(0, 6), textcoords="offset points",
+                            fontsize=6, ha="center", color=color)
+
+    ax.set_ylabel(f"{mdef.label} ({mdef.unit})", fontsize=9)
+
+
+def _save(fig, output: str) -> None:
+    out_path = Path(output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.suffix.lower() == ".html":
+        log.warning("HTML output not supported for this chart configuration; saving as PNG.")
+        out_path = out_path.with_suffix(".png")
+    fig.savefig(str(out_path), dpi=150)
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    print(f"Chart saved to {out_path}", flush=True)
+
+
+# ── Main command ──────────────────────────────────────────────────────────────
 
 def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     import matplotlib
@@ -46,16 +114,28 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         log.error("No repositories specified.")
         sys.exit(1)
 
-    since_ts = date_to_ms(args.since) if args.since else None
-    until_ts = date_to_ms(args.until, end_of_day=True) if args.until else None
-    state = getattr(args, "state", "MERGED")
-    reviewer = getattr(args, "reviewer", None)
-    output = getattr(args, "output", "output/chart.png")
+    since_ts  = date_to_ms(args.since) if args.since else None
+    until_ts  = date_to_ms(args.until, end_of_day=True) if args.until else None
+    state     = getattr(args, "state", "MERGED")
+    output    = getattr(args, "output", "output/chart.png")
     plot_type = getattr(args, "plot_type", "box")
-    period = getattr(args, "period", "month")
+    period    = getattr(args, "period", "month")
+    split_arg = getattr(args, "split", None)
+    layout    = getattr(args, "layout", "stack")
+    reviewer  = getattr(args, "reviewer", None)
 
-    # repo_label -> list of (closed_ms, cycle_time_hours)
-    raw_per_repo: dict[str, list[tuple[int, float]]] = {}
+    # Parse and validate --metrics
+    raw_metrics = getattr(args, "metrics", "cycle_time")
+    requested_metrics = [m.strip() for m in raw_metrics.split(",")]
+    unknown = [m for m in requested_metrics if m not in METRICS]
+    if unknown:
+        log.error("Unknown metric(s): %s. Available: %s", unknown, list(METRICS.keys()))
+        sys.exit(1)
+
+    # ── Fetch raw rows ────────────────────────────────────────────────────────
+    # Fetch all rows (no state filter) so every metric can use the same dataset.
+    # Date range filters on created_date (consistent with original behaviour).
+    raw_per_repo: dict[str, list] = {}
 
     for proj_key, repo_slug in repos:
         repo_row = conn.execute(
@@ -67,11 +147,11 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         repo_id = repo_row["id"]
 
         query = """
-            SELECT created_date, closed_date, reviewers
+            SELECT created_date, closed_date, state, reviewers
             FROM pull_requests
-            WHERE repo_id=? AND state=? AND closed_date IS NOT NULL
+            WHERE repo_id=? AND closed_date IS NOT NULL
         """
-        params: list[Any] = [repo_id, state]
+        params: list[Any] = [repo_id]
         if since_ts:
             query += " AND created_date >= ?"
             params.append(since_ts)
@@ -81,6 +161,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
         rows = conn.execute(query, params).fetchall()
 
+        # Apply --reviewer filter (keeps dataset focused; separate from --split)
         if reviewer:
             mode, username = reviewer.split(":", 1)
             rows = [
@@ -88,170 +169,166 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 if (mode == "include") == (username in json.loads(r["reviewers"] or "[]"))
             ]
 
-        points = [
-            (r["closed_date"], (r["closed_date"] - r["created_date"]) / 3_600_000)
-            for r in rows
-            if r["closed_date"] and r["created_date"]
-        ]
-
         label = f"{proj_key}/{repo_slug}"
-        if not points:
-            log.warning("No data for %s in the specified range/state — skipping.", label)
-            continue
-        raw_per_repo[label] = points
+        if rows:
+            raw_per_repo[label] = rows
 
     conn.close()
 
     if not raw_per_repo:
+        log.error("No data in cache for the specified repos/range.")
+        sys.exit(4)
+
+    # ── Build series ──────────────────────────────────────────────────────────
+    series_list = _build_series(raw_per_repo, split_arg)
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    # ── points ────────────────────────────────────────────────────────────────
+    if plot_type == "points":
+        for series in series_list:
+            times = sorted(
+                (r["closed_date"] - r["created_date"]) / 3_600_000
+                for r in series.rows
+                if r["state"] == state and r["closed_date"] and r["created_date"]
+            )
+            if not times:
+                print(f"\n{series.label}  (no data for state={state})")
+                continue
+            med = statistics.median(times)
+            print(f"\n{series.label}  (n={len(times)}, median={fmt_hours(med)})")
+            for t in times:
+                tag = " ← median" if t == med else ""
+                print(f"  {fmt_hours(t):>8}{tag}")
+        return
+
+    # ── box ───────────────────────────────────────────────────────────────────
+    if plot_type == "box":
+        data = [
+            (s.label, [
+                (r["closed_date"] - r["created_date"]) / 3_600_000
+                for r in s.rows
+                if r["state"] == state and r["closed_date"] and r["created_date"]
+            ])
+            for s in series_list
+        ]
+        data = [(lbl, times) for lbl, times in data if times]
+        if not data:
+            log.error("No data to plot.")
+            sys.exit(4)
+
+        fig, ax = plt.subplots(figsize=(max(8, len(data) * 1.5), 7))
+        bp = ax.boxplot([times for _, times in data],
+                        labels=[lbl for lbl, _ in data], patch_artist=True)
+        for i, patch in enumerate(bp["boxes"]):
+            patch.set_facecolor(colors[i % len(colors)])
+            patch.set_alpha(0.7)
+
+        y_min, y_max = ax.get_ylim()
+        ann_min_y = y_min + (y_max - y_min) * 0.04
+        for i, (lbl, times) in enumerate(data, 1):
+            med = statistics.median(times)
+            ann_y = max(med, ann_min_y)
+            ax.annotate(
+                f"med={fmt_hours(med)}\nn={len(times)}",
+                xy=(i, med), xytext=(i, ann_y), textcoords="data",
+                fontsize=7, color="darkred", ha="center", va="bottom",
+                arrowprops=dict(arrowstyle="-", color="darkred", lw=0.5) if ann_y > med else None,
+            )
+
+        ax.set_ylabel("Cycle Time (hours)")
+        ax.set_xlabel("Series")
+        ax.set_title(f"Cycle Time Distribution ({state})")
+        plt.xticks(rotation=30, ha="right")
+        plt.tight_layout()
+        _save(fig, output)
+        return
+
+    # ── trend ─────────────────────────────────────────────────────────────────
+    # Pre-compute: metric_results[metric_name] = [(series_label, {bucket: value})]
+    all_buckets: set[str] = set()
+    metric_results: dict[str, list[tuple[str, dict]]] = {}
+
+    for metric_name in requested_metrics:
+        mdef = METRICS[metric_name]
+        series_data = []
+        for series in series_list:
+            buckets = mdef.compute(series.rows, period, state)
+            series_data.append((series.label, buckets))
+            all_buckets.update(buckets.keys())
+        metric_results[metric_name] = series_data
+
+    if not all_buckets:
         log.error("No data to plot.")
         sys.exit(4)
 
-    # ── points: print sorted list to stdout, no file ───────────────────────────
-    if plot_type == "points":
-        for label, points in raw_per_repo.items():
-            times = sorted(t for _, t in points)
-            med = statistics.median(times)
-            print(f"\n{label}  (n={len(times)}, median={_fmt_h(med)})")
-            for t in times:
-                tag = " ← median" if t == med else ""
-                print(f"  {_fmt_h(t):>8}{tag}")
-        return
+    sorted_buckets = sorted(all_buckets)
+    n_metrics = len(requested_metrics)
+    period_label = "Week" if period == "week" else "Month"
+    w = max(10, len(sorted_buckets) * 0.8)
 
-    # ── trend: median per period, line chart ──────────────────────────────────
-    if plot_type == "trend":
-        # collect all bucket keys across repos for consistent x-axis
-        all_buckets: set[str] = set()
-        trend_per_repo: dict[str, dict[str, list[float]]] = {}
-        for label, points in raw_per_repo.items():
-            buckets: dict[str, list[float]] = defaultdict(list)
-            for closed_ms, ct in points:
-                key = _bucket_key(closed_ms, period)
-                buckets[key].append(ct)
-                all_buckets.add(key)
-            trend_per_repo[label] = dict(buckets)
-
-        sorted_buckets = sorted(all_buckets)
-
-        fig, ax = plt.subplots(figsize=(max(10, len(sorted_buckets) * 0.8), 6))
-        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-
-        for idx, (label, buckets) in enumerate(trend_per_repo.items()):
-            color = colors[idx % len(colors)]
-            x_pos, y_med, y_n = [], [], []
-            for i, bk in enumerate(sorted_buckets):
-                times = buckets.get(bk)
-                if times:
-                    x_pos.append(i)
-                    y_med.append(statistics.median(times))
-                    y_n.append(len(times))
-
-            ax.plot(x_pos, y_med, marker="o", label=label, color=color, linewidth=1.5)
-            for x, y, n in zip(x_pos, y_med, y_n):
-                ax.annotate(f"{_fmt_h(y)}\nn={n}", xy=(x, y),
-                            xytext=(0, 6), textcoords="offset points",
-                            fontsize=6, ha="center", color=color)
-
+    if n_metrics == 1:
+        # Single metric — simple plot
+        fig, ax = plt.subplots(figsize=(w, 6))
+        mname = requested_metrics[0]
+        mdef = METRICS[mname]
+        _draw_trend_ax(ax, metric_results[mname], sorted_buckets, mdef, colors)
         ax.set_xticks(range(len(sorted_buckets)))
         ax.set_xticklabels(sorted_buckets, rotation=45, ha="right")
-        ax.set_ylabel("Median Cycle Time (hours)")
-        period_label = "Week" if period == "week" else "Month"
-        ax.set_title(f"Median Cycle Time by {period_label} ({state})")
-        ax.legend(loc="upper right", fontsize=8)
+        ax.set_title(f"{mdef.label} by {period_label} ({state})")
+        ax.legend(fontsize=8)
         plt.tight_layout()
 
-        out_path = Path(output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        if out_path.suffix.lower() == ".html":
-            try:
-                import plotly.graph_objects as go
-                fig_plotly = go.Figure()
-                for label, buckets in trend_per_repo.items():
-                    xs, ys, ns = [], [], []
-                    for bk in sorted_buckets:
-                        times = buckets.get(bk)
-                        if times:
-                            xs.append(bk)
-                            ys.append(statistics.median(times))
-                            ns.append(len(times))
-                    fig_plotly.add_trace(go.Scatter(
-                        x=xs, y=ys, mode="lines+markers", name=label,
-                        text=[f"n={n}" for n in ns], hovertemplate="%{x}<br>%{y:.1f}h<br>%{text}",
-                    ))
-                fig_plotly.update_layout(
-                    yaxis_title="Median Cycle Time (hours)",
-                    xaxis_title=period_label,
-                    title=f"Median Cycle Time by {period_label} ({state})",
-                )
-                fig_plotly.write_html(str(out_path))
-                plt.close(fig)
-            except ImportError:
-                log.warning("plotly not installed, saving as PNG instead.")
-                out_path = out_path.with_suffix(".png")
-                fig.savefig(str(out_path), dpi=150)
-                plt.close(fig)
-        else:
-            fig.savefig(str(out_path), dpi=150)
-            plt.close(fig)
-        print(f"Chart saved to {out_path}", flush=True)
-        return
+    elif layout == "overlay" and n_metrics == 2:
+        # Two metrics on one axes with dual y-axis.
+        # Same color = same series. Solid line = metric 0, dashed = metric 1.
+        from matplotlib.lines import Line2D
 
-    # ── box: one box per repo ─────────────────────────────────────────────────
-    labels = list(raw_per_repo.keys())
-    values = [[t for _, t in raw_per_repo[l]] for l in labels]
+        fig, ax1 = plt.subplots(figsize=(w, 6))
+        ax2 = ax1.twinx()
 
-    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 1.5), 7))
-    bp = ax.boxplot(values, labels=labels, patch_artist=True)
-    for patch in bp["boxes"]:
-        patch.set_facecolor("#4A90D9")
-        patch.set_alpha(0.7)
+        mname0, mname1 = requested_metrics[0], requested_metrics[1]
+        mdef0, mdef1 = METRICS[mname0], METRICS[mname1]
 
-    y_min, y_max = ax.get_ylim()
-    annotation_min_y = y_min + (y_max - y_min) * 0.04
+        _draw_trend_ax(ax1, metric_results[mname0], sorted_buckets, mdef0,
+                       colors, linestyles=["-"] * len(series_list))
+        _draw_trend_ax(ax2, metric_results[mname1], sorted_buckets, mdef1,
+                       colors, linestyles=["--"] * len(series_list))
 
-    for i, (label, points) in enumerate(raw_per_repo.items(), 1):
-        times = [t for _, t in points]
-        median = statistics.median(times)
-        ann_y = max(median, annotation_min_y)
-        ax.annotate(
-            f"med={_fmt_h(median)}\nn={len(times)}",
-            xy=(i, median),
-            xytext=(i, ann_y),
-            textcoords="data",
-            fontsize=7,
-            color="darkred",
-            ha="center",
-            va="bottom",
-            arrowprops=dict(arrowstyle="-", color="darkred", lw=0.5) if ann_y > median else None,
-        )
+        ax1.set_xticks(range(len(sorted_buckets)))
+        ax1.set_xticklabels(sorted_buckets, rotation=45, ha="right")
+        ax1.set_title(f"{mdef0.label} & {mdef1.label} by {period_label} ({state})")
 
-    ax.set_ylabel("Cycle Time (hours)")
-    ax.set_xlabel("Repository")
-    ax.set_title(f"Cycle Time Distribution ({state})")
-    plt.xticks(rotation=30, ha="right")
-    plt.tight_layout()
+        # Combined legend: series (by color) + metric style guide
+        series_handles, series_labels = ax1.get_legend_handles_labels()
+        style_handles = [
+            Line2D([0], [0], color="gray", ls="-",  label=f"─  {mdef0.label}"),
+            Line2D([0], [0], color="gray", ls="--", label=f"╌  {mdef1.label}"),
+        ]
+        ax1.legend(handles=series_handles + style_handles,
+                   labels=series_labels + [h.get_label() for h in style_handles],
+                   fontsize=7, loc="best")
+        plt.tight_layout()
 
-    out_path = Path(output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.suffix.lower() == ".html":
-        try:
-            import plotly.graph_objects as go
-            fig_plotly = go.Figure()
-            for label, points in raw_per_repo.items():
-                fig_plotly.add_trace(go.Box(y=[t for _, t in points], name=label))
-            fig_plotly.update_layout(
-                yaxis_title="Cycle Time (hours)",
-                xaxis_title="Repository",
-                title=f"Cycle Time Distribution ({state})",
-            )
-            fig_plotly.write_html(str(out_path))
-            plt.close(fig)
-        except ImportError:
-            log.warning("plotly not installed, saving as PNG instead.")
-            out_path = out_path.with_suffix(".png")
-            fig.savefig(str(out_path), dpi=150)
-            plt.close(fig)
     else:
-        fig.savefig(str(out_path), dpi=150)
-        plt.close(fig)
+        # Stack: N subplots sharing the x-axis (works for any number of metrics)
+        fig, axes = plt.subplots(
+            n_metrics, 1,
+            figsize=(w, 4 * n_metrics),
+            sharex=True,
+            squeeze=False,
+        )
+        axes = [row[0] for row in axes]
 
-    print(f"Chart saved to {out_path}", flush=True)
+        for ax, mname in zip(axes, requested_metrics):
+            mdef = METRICS[mname]
+            _draw_trend_ax(ax, metric_results[mname], sorted_buckets, mdef, colors)
+            ax.legend(fontsize=8)
+
+        axes[-1].set_xticks(range(len(sorted_buckets)))
+        axes[-1].set_xticklabels(sorted_buckets, rotation=45, ha="right")
+        title = " + ".join(METRICS[m].label for m in requested_metrics)
+        axes[0].set_title(f"{title} by {period_label} ({state})")
+        plt.tight_layout()
+
+    _save(fig, output)

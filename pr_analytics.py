@@ -61,13 +61,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", help="Start date (YYYY-MM-DD)")
     p.add_argument("--until", help="End date (YYYY-MM-DD)")
     p.add_argument("--state", default="MERGED", choices=["MERGED", "DECLINED", "OPEN"])
-    p.add_argument("--reviewer", help="include:<slug> or exclude:<slug>")
+    p.add_argument("--reviewer", help="include:<slug> or exclude:<slug>  (filters dataset)")
     p.add_argument("--type", default="box", choices=["box", "points", "trend"],
                    dest="plot_type",
-                   help="Chart type: box (default), points (raw values to stdout), trend (median over time)")
+                   help="Chart type: box (default), points (raw values to stdout), trend (over time)")
     p.add_argument("--period", default="month", choices=["week", "month"],
-                   help="Bucketing period for trend chart (default: month)")
-    p.add_argument("--output", default="output/chart.png", help="Output file (.png/.svg/.html)")
+                   help="Bucketing period for trend (default: month)")
+    p.add_argument("--metrics", default="cycle_time",
+                   help="Comma-separated metrics for trend: cycle_time, acceptance_rate, throughput"
+                        " (default: cycle_time)")
+    p.add_argument("--split", default=None, metavar="KIND:VALUE",
+                   help="Split into two series, e.g. reviewer:<slug>")
+    p.add_argument("--layout", default="stack", choices=["stack", "overlay"],
+                   help="Layout when multiple metrics: stack (default) or overlay (dual y-axis, max 2 metrics)")
+    p.add_argument("--output", default="output/chart.png", help="Output file (.png/.svg)")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
     # ── find-repos ─────────────────────────────────────────────────────────────
