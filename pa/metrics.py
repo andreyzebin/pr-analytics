@@ -74,6 +74,15 @@ def _throughput(rows, period: str, state: str) -> dict[str, float]:
     return dict(buckets)
 
 
+def _total_prs(rows, period: str, state: str) -> dict[str, float]:
+    """Total count of PRs (any terminal state) per period, bucketed by closed_date."""
+    buckets: dict[str, int] = defaultdict(int)
+    for r in rows:
+        if r["state"] in ("MERGED", "DECLINED") and r["closed_date"]:
+            buckets[bucket_key(r["closed_date"], period)] += 1
+    return dict(buckets)
+
+
 def _time_to_first_comment(rows, period: str, state: str) -> dict[str, float]:
     """Median hours from PR creation to first non-author comment, bucketed by closed_date.
 
@@ -108,6 +117,10 @@ METRICS: dict[str, MetricDef] = {
     "throughput": MetricDef(
         label="Throughput", unit="PRs merged", plot_kind="bar",
         compute=_throughput, fmt=lambda v: str(int(v)),
+    ),
+    "total_prs": MetricDef(
+        label="Total PRs", unit="count", plot_kind="bar",
+        compute=_total_prs, fmt=lambda v: str(int(v)),
     ),
     "time_to_first_comment": MetricDef(
         label="Time to First Review Comment", unit="hours", plot_kind="line",
