@@ -1,0 +1,13 @@
+.venv/
+.env
+config.local.yaml
+bitbucket_cache.db
+*.db
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.idea/
+dist/
+build/
+*.egg-info/

@@ -1,0 +1,21 @@
+bitbucket:
+  # Base URL of your Bitbucket Server instance (without /rest/api)
+  url: ""
+
+  # Personal Access Token — set via env var, not here
+  token: "${BB_TOKEN}"
+
+  # Custom CA bundle — needed when Bitbucket uses a private/corporate cert
+  # Can be set via REQUESTS_CA_BUNDLE env var instead
+  ca_bundle: "${REQUESTS_CA_BUNDLE}"
+
+  # mTLS client certificate (PEM) — leave empty if not required
+  # Can be set via BITBUCKET_SERVER_CLIENT_CERT env var instead
+  client_cert: "${BITBUCKET_SERVER_CLIENT_CERT}"
+
+cache:
+  # SQLite database file path
+  db: bitbucket_cache.db
+
+  # Number of parallel threads for fetching repos/PRs
+  concurrency: 4
