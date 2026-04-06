@@ -84,7 +84,7 @@ def _time_to_first_comment(rows, period: str, state: str) -> dict[str, float]:
     for r in rows:
         if r["state"] != state or not r["closed_date"]:
             continue
-        fcd = r["first_comment_date"] if "first_comment_date" in r.keys() else None
+        fcd = r.get("first_comment_date") if isinstance(r, dict) else None
         if not fcd or not r["created_date"]:
             continue
         hours = (fcd - r["created_date"]) / 3_600_000

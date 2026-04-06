@@ -240,20 +240,16 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         repo_id = repo_row["id"]
 
         query = """
-            SELECT pr.created_date, pr.closed_date, pr.state, pr.reviewers,
-                   MIN(CASE WHEN c.author != pr.author THEN c.created_date END)
-                       AS first_comment_date
-            FROM pull_requests pr
-            LEFT JOIN pr_comments c ON c.repo_id = pr.repo_id AND c.pr_id = pr.pr_id
-            WHERE pr.repo_id=? AND pr.closed_date IS NOT NULL
-            GROUP BY pr.rowid
+            SELECT repo_id, pr_id, created_date, closed_date, state, reviewers
+            FROM pull_requests
+            WHERE repo_id=? AND closed_date IS NOT NULL
         """
         params: list[Any] = [repo_id]
         if since_ts:
-            query += " AND pr.created_date >= ?"
+            query += " AND created_date >= ?"
             params.append(since_ts)
         if until_ts:
-            query += " AND pr.created_date <= ?"
+            query += " AND created_date <= ?"
             params.append(until_ts)
 
         rows = conn.execute(query, params).fetchall()
@@ -268,7 +264,21 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
         label = f"{proj_key}/{repo_slug}"
         if rows:
-            raw_per_repo[label] = rows
+            raw_per_repo[label] = [dict(r) for r in rows]
+
+    # ── Augment with first_comment_date (separate query, no JOIN) ─────────────
+    if "time_to_first_comment" in requested_metrics and raw_per_repo:
+        fcd_rows = conn.execute("""
+            SELECT c.repo_id, c.pr_id, MIN(c.created_date) AS fcd
+            FROM pr_comments c
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author != pr.author
+            GROUP BY c.repo_id, c.pr_id
+        """).fetchall()
+        fcd_map = {(r["repo_id"], r["pr_id"]): r["fcd"] for r in fcd_rows}
+        for rows_list in raw_per_repo.values():
+            for d in rows_list:
+                d["first_comment_date"] = fcd_map.get((d["repo_id"], d["pr_id"]))
 
     conn.close()
 
