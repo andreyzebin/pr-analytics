@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS projects (
+    key TEXT PRIMARY KEY,
+    name TEXT,
+    cache_date TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS repos (
+    id INTEGER PRIMARY KEY,
+    project_key TEXT,
+    slug TEXT,
+    name TEXT,
+    FOREIGN KEY(project_key) REFERENCES projects(key)
+);
+
+CREATE TABLE IF NOT EXISTS pull_requests (
+    repo_id INTEGER,
+    pr_id INTEGER,
+    title TEXT,
+    author TEXT,
+    created_date INTEGER,
+    closed_date INTEGER,
+    updated_date INTEGER,
+    state TEXT,
+    reviewers TEXT,
+    PRIMARY KEY (repo_id, pr_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pr_state_created ON pull_requests(state, created_date);
+CREATE INDEX IF NOT EXISTS idx_pr_reviewers ON pull_requests(reviewers);
+
+CREATE TABLE IF NOT EXISTS pr_comments (
+    id INTEGER PRIMARY KEY,
+    repo_id INTEGER,
+    pr_id INTEGER,
+    parent_id INTEGER,
+    author TEXT,
+    text TEXT,
+    created_date INTEGER,
+    updated_date INTEGER,
+    severity TEXT,
+    state TEXT,
+    file_path TEXT,
+    line INTEGER,
+    line_type TEXT,
+    file_type TEXT,
+    FOREIGN KEY(repo_id, pr_id) REFERENCES pull_requests(repo_id, pr_id)
+);
+CREATE INDEX IF NOT EXISTS idx_comments_author ON pr_comments(author);
+CREATE INDEX IF NOT EXISTS idx_comments_pr ON pr_comments(repo_id, pr_id);
+CREATE INDEX IF NOT EXISTS idx_comments_parent ON pr_comments(parent_id);
+CREATE INDEX IF NOT EXISTS idx_comments_state ON pr_comments(state);
+
+CREATE TABLE IF NOT EXISTS comment_reactions (
+    comment_id INTEGER,
+    author TEXT,
+    emoji TEXT,
+    PRIMARY KEY (comment_id, author, emoji),
+    FOREIGN KEY(comment_id) REFERENCES pr_comments(id)
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_comment ON comment_reactions(comment_id);
+"""
+
+
+def open_db(db_path: str) -> sqlite3.Connection:
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(SCHEMA_SQL)
+    conn.commit()
+    return conn
+
+
+def upsert_project(conn: sqlite3.Connection, key: str, name: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO projects(key, name, cache_date) VALUES(?,?,?)",
+        (key, name, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def upsert_repo(conn: sqlite3.Connection, repo_id: int, project_key: str, slug: str, name: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO repos(id, project_key, slug, name) VALUES(?,?,?,?)",
+        (repo_id, project_key, slug, name),
+    )
+
+
+def upsert_pr(conn: sqlite3.Connection, repo_id: int, pr: dict) -> None:
+    reviewers = json.dumps([r["user"]["slug"] for r in pr.get("reviewers", [])])
+    closed_date = None
+    if pr.get("closedDate"):
+        closed_date = pr["closedDate"]
+    elif pr.get("state") in ("MERGED", "DECLINED") and pr.get("updatedDate"):
+        closed_date = pr["updatedDate"]
+
+    conn.execute(
+        """INSERT OR REPLACE INTO pull_requests
+           (repo_id, pr_id, title, author, created_date, closed_date, updated_date, state, reviewers)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (
+            repo_id,
+            pr["id"],
+            pr.get("title", ""),
+            pr.get("author", {}).get("user", {}).get("slug", ""),
+            pr.get("createdDate"),
+            closed_date,
+            pr.get("updatedDate"),
+            pr.get("state", ""),
+            reviewers,
+        ),
+    )
+
+
+def delete_pr_comments(conn: sqlite3.Connection, repo_id: int, pr_id: int) -> None:
+    comment_ids = [
+        row[0] for row in conn.execute(
+            "SELECT id FROM pr_comments WHERE repo_id=? AND pr_id=?", (repo_id, pr_id)
+        ).fetchall()
+    ]
+    if comment_ids:
+        placeholders = ",".join("?" * len(comment_ids))
+        conn.execute(f"DELETE FROM comment_reactions WHERE comment_id IN ({placeholders})", comment_ids)
+    conn.execute("DELETE FROM pr_comments WHERE repo_id=? AND pr_id=?", (repo_id, pr_id))
+
+
+def insert_comment(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    pr_id: int,
+    comment: dict,
+    parent_id: Optional[int],
+    anchor: Optional[dict],
+) -> None:
+    conn.execute(
+        """INSERT OR REPLACE INTO pr_comments
+           (id, repo_id, pr_id, parent_id, author, text, created_date, updated_date,
+            severity, state, file_path, line, line_type, file_type)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            comment["id"],
+            repo_id,
+            pr_id,
+            parent_id,
+            comment.get("author", {}).get("slug", ""),
+            comment.get("text", ""),
+            comment.get("createdDate"),
+            comment.get("updatedDate"),
+            comment.get("severity", "NORMAL"),
+            comment.get("state", "OPEN"),
+            anchor.get("path") if anchor else None,
+            anchor.get("line") if anchor else None,
+            anchor.get("lineType") if anchor else None,
+            anchor.get("fileType") if anchor else None,
+        ),
+    )
+
+
+def insert_reactions(conn: sqlite3.Connection, comment_id: int, comment: dict) -> None:
+    for reaction in comment.get("properties", {}).get("reactions", []):
+        emoji = reaction.get("emoticon", {}).get("shortcut", "")
+        if not emoji:
+            continue
+        for user in reaction.get("users", []):
+            slug = user.get("slug", "")
+            if slug:
+                conn.execute(
+                    "INSERT OR IGNORE INTO comment_reactions(comment_id, author, emoji) VALUES(?,?,?)",
+                    (comment_id, slug, emoji),
+                )
+
+
+def walk_comment_thread(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    pr_id: int,
+    comment: dict,
+    parent_id: Optional[int],
+    anchor: Optional[dict],
+) -> None:
+    insert_comment(conn, repo_id, pr_id, comment, parent_id, anchor)
+    if parent_id is None:
+        insert_reactions(conn, comment["id"], comment)
+    for child in comment.get("comments", []):
+        walk_comment_thread(conn, repo_id, pr_id, child, comment["id"], anchor=None)
