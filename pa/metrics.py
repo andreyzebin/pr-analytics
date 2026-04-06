@@ -36,6 +36,7 @@ class MetricDef:
     plot_kind: str   # "line" | "bar"
     compute: Callable  # (rows, period, state) -> dict[str, float]
     fmt: Callable      # (value) -> annotation string
+    log_scale: bool = False  # logarithmic Y-axis
 
 
 # ── compute functions ─────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ def _time_to_first_comment(rows, period: str, state: str) -> dict[str, float]:
 METRICS: dict[str, MetricDef] = {
     "cycle_time": MetricDef(
         label="Median Cycle Time", unit="hours", plot_kind="line",
-        compute=_cycle_time, fmt=fmt_hours,
+        compute=_cycle_time, fmt=fmt_hours, log_scale=True,
     ),
     "acceptance_rate": MetricDef(
         label="Acceptance Rate", unit="%", plot_kind="line",
@@ -124,6 +125,6 @@ METRICS: dict[str, MetricDef] = {
     ),
     "time_to_first_comment": MetricDef(
         label="Time to First Review Comment", unit="hours", plot_kind="line",
-        compute=_time_to_first_comment, fmt=fmt_hours,
+        compute=_time_to_first_comment, fmt=fmt_hours, log_scale=True,
     ),
 }

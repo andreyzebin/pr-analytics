@@ -100,6 +100,8 @@ def _draw_trend_ax(
                             fontsize=6, ha="center", color=color)
 
     ax.set_ylabel(f"{mdef.label} ({mdef.unit})", fontsize=9)
+    if mdef.log_scale:
+        ax.set_yscale("log")
 
 
 def _save(fig, output: str) -> None:
@@ -162,7 +164,11 @@ def _save_trend_html(
                     ),
                     row=row_idx, col=1,
                 )
-            fig.update_yaxes(title_text=f"{mdef.label} ({mdef.unit})", row=row_idx, col=1)
+            fig.update_yaxes(
+                title_text=f"{mdef.label} ({mdef.unit})",
+                type="log" if mdef.log_scale else "-",
+                row=row_idx, col=1,
+            )
 
     else:  # overlay — dual y-axis
         assert n == 2
@@ -191,8 +197,10 @@ def _save_trend_html(
                 hovertemplate="%{x}<br>%{text}<extra>" + label + " — " + mdef1.label + "</extra>",
                 legendgroup=label, showlegend=True,
             ), secondary_y=True)
-        fig.update_yaxes(title_text=f"{mdef0.label} ({mdef0.unit})", secondary_y=False)
-        fig.update_yaxes(title_text=f"{mdef1.label} ({mdef1.unit})", secondary_y=True)
+        fig.update_yaxes(title_text=f"{mdef0.label} ({mdef0.unit})",
+                         type="log" if mdef0.log_scale else "-", secondary_y=False)
+        fig.update_yaxes(title_text=f"{mdef1.label} ({mdef1.unit})",
+                         type="log" if mdef1.log_scale else "-", secondary_y=True)
 
     title = " + ".join(METRICS[m].label for m in requested_metrics)
     fig.update_layout(
