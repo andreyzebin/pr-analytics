@@ -71,7 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated metrics for trend: cycle_time, acceptance_rate, throughput"
                         " (default: cycle_time)")
     p.add_argument("--split", default=None, metavar="KIND:VALUE",
-                   help="Split into two series, e.g. reviewer:<slug>")
+                   help="Split into two series: reviewer:<slug> (in reviewers list) "
+                        "or commenter:<slug> (left at least one comment)")
     p.add_argument("--layout", default="stack", choices=["stack", "overlay"],
                    help="Layout when multiple metrics: stack (default) or overlay (dual y-axis, max 2 metrics)")
     p.add_argument("--output", default="output/chart.png", help="Output file (.png/.svg)")

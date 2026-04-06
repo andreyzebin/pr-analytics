@@ -26,28 +26,43 @@ class Series:
     rows: list = field(default_factory=list)
 
 
-def _build_series(raw_per_repo: dict[str, list], split_arg: str | None) -> list[Series]:
+def _build_series(
+    raw_per_repo: dict[str, list],
+    split_arg: str | None,
+    commenter_pr_set: set[tuple] | None = None,
+) -> list[Series]:
     """
     Default: one Series per repo.
-    --split reviewer:<slug>: aggregate all repos, split into two series
-      by presence/absence of <slug> in the reviewers list.
+    --split reviewer:<slug>  — split by presence in PR reviewers list.
+    --split commenter:<slug> — split by presence of at least one comment from slug.
     """
     if split_arg is None:
         return [Series(label=lbl, rows=rows) for lbl, rows in raw_per_repo.items()]
 
     kind, value = split_arg.split(":", 1)
-    if kind != "reviewer":
-        log.error("Unsupported --split kind %r. Currently supported: reviewer:<slug>", kind)
-        sys.exit(1)
-
-    slug = value
     all_rows = [r for rows in raw_per_repo.values() for r in rows]
-    with_rows    = [r for r in all_rows if slug in json.loads(r["reviewers"] or "[]")]
-    without_rows = [r for r in all_rows if slug not in json.loads(r["reviewers"] or "[]")]
-    return [
-        Series(label=f"+ {slug}", rows=with_rows),
-        Series(label=f"- {slug}", rows=without_rows),
-    ]
+
+    if kind == "reviewer":
+        slug = value
+        with_rows    = [r for r in all_rows if slug in json.loads(r["reviewers"] or "[]")]
+        without_rows = [r for r in all_rows if slug not in json.loads(r["reviewers"] or "[]")]
+        return [
+            Series(label=f"+ {slug}", rows=with_rows),
+            Series(label=f"- {slug}", rows=without_rows),
+        ]
+
+    if kind == "commenter":
+        slug = value
+        ps = commenter_pr_set or set()
+        with_rows    = [r for r in all_rows if (r["repo_id"], r["pr_id"]) in ps]
+        without_rows = [r for r in all_rows if (r["repo_id"], r["pr_id"]) not in ps]
+        return [
+            Series(label=f"∈ {slug}", rows=with_rows),
+            Series(label=f"∉ {slug}", rows=without_rows),
+        ]
+
+    log.error("Unsupported --split kind %r. Supported: reviewer:<slug>, commenter:<slug>", kind)
+    sys.exit(1)
 
 
 # ── Trend rendering ───────────────────────────────────────────────────────────
@@ -280,6 +295,17 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             for d in rows_list:
                 d["first_comment_date"] = fcd_map.get((d["repo_id"], d["pr_id"]))
 
+    # ── Fetch commenter set (before conn.close) ───────────────────────────────
+    commenter_pr_set: set[tuple] | None = None
+    if split_arg and split_arg.startswith("commenter:"):
+        slug = split_arg.split(":", 1)[1]
+        commenter_pr_set = {
+            (r["repo_id"], r["pr_id"])
+            for r in conn.execute(
+                "SELECT DISTINCT repo_id, pr_id FROM pr_comments WHERE author = ?", (slug,)
+            ).fetchall()
+        }
+
     conn.close()
 
     if not raw_per_repo:
@@ -287,7 +313,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         sys.exit(4)
 
     # ── Build series ──────────────────────────────────────────────────────────
-    series_list = _build_series(raw_per_repo, split_arg)
+    series_list = _build_series(raw_per_repo, split_arg, commenter_pr_set)
 
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
