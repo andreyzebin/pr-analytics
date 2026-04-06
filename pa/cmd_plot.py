@@ -12,7 +12,7 @@ from typing import Any
 from pa.config import resolve_db
 from pa.db import open_db
 from pa.metrics import METRICS, MetricDef, fmt_hours
-from pa.utils import collect_repos_from_args, date_to_ms
+from pa.utils import collect_repos_from_args, date_to_ms, ms_to_date
 
 log = logging.getLogger(__name__)
 
@@ -327,20 +327,34 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
     # ── points ────────────────────────────────────────────────────────────────
     if plot_type == "points":
+        # repo_id -> "PROJ/repo" label (built from raw_per_repo rows)
+        repo_id_to_label: dict[int, str] = {}
+        for lbl, rows_list in raw_per_repo.items():
+            for r in rows_list:
+                repo_id_to_label[r["repo_id"]] = lbl
+
         for series in series_list:
-            times = sorted(
-                (r["closed_date"] - r["created_date"]) / 3_600_000
+            pts = sorted(
+                (
+                    r["closed_date"],
+                    r["repo_id"],
+                    r["pr_id"],
+                    (r["closed_date"] - r["created_date"]) / 3_600_000,
+                )
                 for r in series.rows
                 if r["state"] == state and r["closed_date"] and r["created_date"]
             )
-            if not times:
+            if not pts:
                 print(f"\n{series.label}  (no data for state={state})")
                 continue
+            times = [t for _, _, _, t in pts]
             med = statistics.median(times)
-            print(f"\n{series.label}  (n={len(times)}, median={fmt_hours(med)})")
-            for t in times:
-                tag = " ← median" if t == med else ""
-                print(f"  {fmt_hours(t):>8}{tag}")
+            print(f"\n{series.label}  (n={len(pts)}, median={fmt_hours(med)})")
+            for closed_ms, repo_id, pr_id, t in pts:
+                date_str = ms_to_date(closed_ms)
+                repo_label = repo_id_to_label.get(repo_id, str(repo_id))
+                tag = "  ← median" if t == med else ""
+                print(f"  {date_str}  {repo_label}#{pr_id:<6}  {fmt_hours(t):>8}{tag}")
         return
 
     # ── box ───────────────────────────────────────────────────────────────────
