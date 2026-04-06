@@ -350,11 +350,13 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             times = [t for _, _, _, t in pts]
             med = statistics.median(times)
             print(f"\n{series.label}  (n={len(pts)}, median={fmt_hours(med)})")
+            col_w = max(len(f"{repo_id_to_label.get(rid, '')}#{pid}") for _, rid, pid, _ in pts)
             for closed_ms, repo_id, pr_id, t in pts:
                 date_str = ms_to_date(closed_ms)
                 repo_label = repo_id_to_label.get(repo_id, str(repo_id))
+                ref = f"{repo_label}#{pr_id}"
                 tag = "  ← median" if t == med else ""
-                print(f"  {date_str}  {repo_label}#{pr_id:<6}  {fmt_hours(t):>8}{tag}")
+                print(f"  {date_str}  {ref:<{col_w}}  {fmt_hours(t):>8}{tag}")
         return
 
     # ── box ───────────────────────────────────────────────────────────────────
