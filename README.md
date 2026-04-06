@@ -122,22 +122,37 @@ source .env
 
 ### `plot` — график Cycle Time
 
-Строит boxplot медианного времени от создания PR до закрытия (в часах).
+Три типа вывода (`--type`):
+
+| Тип | Описание |
+|---|---|
+| `box` | Boxplot по репозиторию (по умолчанию) |
+| `trend` | Линейный график медианы по времени (неделя / месяц) |
+| `points` | Отсортированный список значений в stdout, файл не создаётся |
 
 ```bash
+# Boxplot
 .venv/bin/python pr_analytics.py plot \
   --repos "PROJ1/backend,PROJ2/frontend" \
   --since 2026-01-01 --until 2026-03-31 \
-  --state MERGED \
-  --output chart.png
-```
+  --state MERGED --output output/chart.png
 
-```bash
-# Из файла со списком репозиториев
+# Тренд по месяцам — PNG или интерактивный HTML
 .venv/bin/python pr_analytics.py plot \
-  --repos-file repos.txt \
-  --since 2026-01-01 \
-  --output chart.svg
+  --repos "PROJ1/backend" \
+  --since 2025-01-01 --state MERGED \
+  --type trend --period month --output output/trend.html
+
+# Тренд по неделям, несколько репо на одном графике
+.venv/bin/python pr_analytics.py plot \
+  --projects PROJ1 \
+  --since 2025-01-01 --state MERGED \
+  --type trend --period week --output output/trend.png
+
+# Сырые точки для отладки
+.venv/bin/python pr_analytics.py plot \
+  --repos "PROJ1/backend" --since 2026-01-01 \
+  --type points
 ```
 
 | Параметр | Описание |
@@ -145,7 +160,11 @@ source .env
 | `--repos` / `--projects` / `--repos-file` | Источник репозиториев |
 | `--state` | `MERGED` (по умолчанию), `DECLINED`, `OPEN` |
 | `--reviewer` | `include:<slug>` или `exclude:<slug>` |
-| `--output` | `.png`, `.svg` или `.html` (plotly) |
+| `--type` | `box` / `trend` / `points` |
+| `--period` | `month` (по умолчанию) или `week` — для `--type trend` |
+| `--output` | `.png`, `.svg` или `.html` (plotly, для trend — интерактивный) |
+
+Cycle Time считается как `closed_date − created_date` в часах. Точки в trend-графике группируются по `closed_date` PR.
 
 ---
 
