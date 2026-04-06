@@ -14,8 +14,8 @@ bitbucket:
   client_cert: "${BITBUCKET_SERVER_CLIENT_CERT}"
 
 cache:
-  # SQLite database file path
-  db: bitbucket_cache.db
+  # SQLite database file path (relative to working directory)
+  db: output/bitbucket_cache.db
 
   # Number of parallel threads for fetching repos/PRs
   concurrency: 4

@@ -1,8 +1,7 @@
 .venv/
 .env
 config.local.yaml
-bitbucket_cache.db
-*.db
+output/
 __pycache__/
 *.pyc
 *.pyo

@@ -5,7 +5,7 @@
 ## Требования
 
 - Python 3.9+
-- Зависимости: `requests`, `pandas`, `matplotlib`, `tabulate`, `pyyaml`
+- Зависимости: `requests`, `pandas`, `matplotlib`, `tabulate`, `pyyaml`, `pytest`
 - Клиентский TLS-сертификат и CA-бандл (если требует инстанс)
 
 ## Установка
@@ -16,7 +16,15 @@ cd pr-analytics
 bash setup_venv.sh
 ```
 
-Скрипт создаёт `.venv/` и устанавливает зависимости из `requirements.txt`.
+Скрипт создаёт `.venv/`, устанавливает зависимости и печатает инструкции по настройке.
+
+## Тесты
+
+```bash
+.venv/bin/pytest tests/ -v
+```
+
+59 тестов без сетевого доступа: конфиг, БД (schema, upsert, threading, реакции), команды (sql, find-repos, status, review-feedback).
 
 ## Конфигурация
 
