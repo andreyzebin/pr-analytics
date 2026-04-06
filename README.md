@@ -171,7 +171,7 @@ source .env
 
 # Эффект AI-агента: split на два когорта по наличию ревьювера
 .venv/bin/python pr_analytics.py plot \
-  --projects MTRAVEL --since 2025-01-01 --state MERGED \
+  --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
   --type trend --period month \
   --metrics cycle_time,acceptance_rate \
   --split reviewer:ai-review-bot \
