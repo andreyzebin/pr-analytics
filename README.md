@@ -120,34 +120,62 @@ source .env
 
 ---
 
-### `plot` — график Cycle Time
+### `plot` — графики метрик PR
 
-Три типа вывода (`--type`):
+**Типы вывода (`--type`):**
 
 | Тип | Описание |
 |---|---|
-| `box` | Boxplot по репозиторию (по умолчанию) |
-| `trend` | Линейный график медианы по времени (неделя / месяц) |
+| `box` | Boxplot cycle time по серии (по умолчанию) |
+| `trend` | Линейный/столбчатый график метрик по времени |
 | `points` | Отсортированный список значений в stdout, файл не создаётся |
 
+**Доступные метрики (`--metrics`, только для `trend`):**
+
+| Метрика | Описание |
+|---|---|
+| `cycle_time` | Медианное время PR от создания до закрытия (часы) |
+| `acceptance_rate` | MERGED / (MERGED + DECLINED) × 100% |
+| `throughput` | Количество смерженных PR за период |
+
+Метрики можно комбинировать через запятую.
+
+#### Примеры
+
 ```bash
-# Boxplot
+# Boxplot cycle time
 .venv/bin/python pr_analytics.py plot \
   --repos "PROJ1/backend,PROJ2/frontend" \
   --since 2026-01-01 --until 2026-03-31 \
   --state MERGED --output output/chart.png
 
-# Тренд по месяцам — PNG или интерактивный HTML
+# Тренд одной метрики по месяцам
 .venv/bin/python pr_analytics.py plot \
-  --repos "PROJ1/backend" \
-  --since 2025-01-01 --state MERGED \
-  --type trend --period month --output output/trend.html
+  --projects PROJ1 --since 2025-01-01 --state MERGED \
+  --type trend --period month --metrics cycle_time \
+  --output output/cycle_time.png
 
-# Тренд по неделям, несколько репо на одном графике
+# Две метрики стопкой (два subplot'а)
 .venv/bin/python pr_analytics.py plot \
-  --projects PROJ1 \
-  --since 2025-01-01 --state MERGED \
-  --type trend --period week --output output/trend.png
+  --projects PROJ1 --since 2025-01-01 --state MERGED \
+  --type trend --period month \
+  --metrics cycle_time,acceptance_rate \
+  --layout stack --output output/metrics.png
+
+# Две метрики на одном графике с двойной осью Y
+.venv/bin/python pr_analytics.py plot \
+  --projects PROJ1 --since 2025-01-01 --state MERGED \
+  --type trend --period month \
+  --metrics cycle_time,acceptance_rate \
+  --layout overlay --output output/overlay.png
+
+# Эффект AI-агента: split на два когорта по наличию ревьювера
+.venv/bin/python pr_analytics.py plot \
+  --projects MTRAVEL --since 2025-01-01 --state MERGED \
+  --type trend --period month \
+  --metrics cycle_time,acceptance_rate \
+  --split reviewer:ai-review-bot \
+  --layout stack --output output/ai_effect.png
 
 # Сырые точки для отладки
 .venv/bin/python pr_analytics.py plot \
@@ -155,16 +183,25 @@ source .env
   --type points
 ```
 
+**Параметры:**
+
 | Параметр | Описание |
 |---|---|
 | `--repos` / `--projects` / `--repos-file` | Источник репозиториев |
 | `--state` | `MERGED` (по умолчанию), `DECLINED`, `OPEN` |
-| `--reviewer` | `include:<slug>` или `exclude:<slug>` |
 | `--type` | `box` / `trend` / `points` |
-| `--period` | `month` (по умолчанию) или `week` — для `--type trend` |
-| `--output` | `.png`, `.svg` или `.html` (plotly, для trend — интерактивный) |
+| `--metrics` | Comma-separated метрики для trend (default: `cycle_time`) |
+| `--period` | `month` (по умолчанию) или `week` — для trend |
+| `--layout` | `stack` (subplot'ы, по умолчанию) или `overlay` (dual y-axis, только 2 метрики) |
+| `--split` | `reviewer:<slug>` — разделить на два когорта по наличию ревьювера |
+| `--reviewer` | `include:<slug>` или `exclude:<slug>` — фильтр датасета (не разбивает) |
+| `--output` | `.png` или `.svg` |
 
-Cycle Time считается как `closed_date − created_date` в часах. Точки в trend-графике группируются по `closed_date` PR.
+**Про `--split`:** все репозитории агрегируются в два когорта — PR где указанный аккаунт был ревьювером и PR где его не было. На графике — две линии на каждой метрике. Основной сценарий: показать влияние AI-агента код-ревью на метрики процесса.
+
+Cycle Time = `closed_date − created_date` в часах. Все trend-метрики группируются по `closed_date`.
+
+**Добавить новую метрику** (DORA, PDLC и др.): написать функцию `(rows, period, state) -> dict[str, float]` и добавить запись в `METRICS` в `pa/metrics.py`. Рендер-слой менять не нужно.
 
 ---
 
