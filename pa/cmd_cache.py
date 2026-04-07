@@ -180,12 +180,11 @@ def cmd_cache(args: argparse.Namespace, cfg: dict) -> None:
             n_prs = len(filtered_prs)
             _set_status(label, f"{n_prs} PRs found, saving…")
 
-            for pr in filtered_prs:
+            comment_count = 0
+            for i, pr in enumerate(filtered_prs):
                 upsert_pr(thread_conn, repo_id, pr)
 
-            comment_count = 0
-            if not no_comments and n_prs > 0:
-                for i, pr in enumerate(filtered_prs):
+                if not no_comments:
                     _set_status(label, f"comments PR {i + 1}/{n_prs}…")
                     delete_pr_comments(thread_conn, repo_id, pr["id"])
                     activities = paginate(
@@ -202,7 +201,7 @@ def cmd_cache(args: argparse.Namespace, cfg: dict) -> None:
                             walk_comment_thread(thread_conn, repo_id, pr["id"], comment, None, anchor)
                             comment_count += 1 + len(comment.get("comments", []))
 
-            thread_conn.commit()
+                thread_conn.commit()  # release write lock after each PR
             _repo_done(label, n_prs, comment_count)
             return n_prs
 
