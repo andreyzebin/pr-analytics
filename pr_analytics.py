@@ -105,8 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
     # ── find-repos ─────────────────────────────────────────────────────────────
-    p = sub.add_parser("find-repos", help="Find repos where user was a reviewer")
-    p.add_argument("--reviewer", required=True, help="Reviewer slug")
+    p = sub.add_parser("find-repos", help="Find repos where user was a reviewer or commenter")
+    p.add_argument("--reviewer", help="Find repos where slug is in formal reviewers list")
+    p.add_argument("--commenter", help="Find repos where slug left at least one comment")
     p.add_argument("--since", help="Start date (YYYY-MM-DD)")
     p.add_argument("--until", help="End date (YYYY-MM-DD)")
     p.add_argument("--state", choices=["MERGED", "DECLINED", "OPEN"])

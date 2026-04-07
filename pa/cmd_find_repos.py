@@ -14,20 +14,36 @@ def cmd_find_repos(args: argparse.Namespace, cfg: dict) -> None:
     db_path = resolve_db(getattr(args, "db", None), cfg)
     conn = open_db(db_path)
 
-    reviewer = args.reviewer
+    reviewer = getattr(args, "reviewer", None)
+    commenter = getattr(args, "commenter", None)
+    if not reviewer and not commenter:
+        print("Error: --reviewer or --commenter is required.", file=sys.stderr)
+        sys.exit(1)
     since_ts = date_to_ms(args.since) if args.since else None
     until_ts = date_to_ms(args.until, end_of_day=True) if args.until else None
     state = getattr(args, "state", None)
 
-    query = """
-        SELECT DISTINCT r.project_key || '/' || r.slug AS repo
-        FROM pull_requests pr
-        JOIN repos r ON r.id = pr.repo_id
-        WHERE EXISTS (
-            SELECT 1 FROM json_each(pr.reviewers) WHERE value = ?
-        )
-    """
-    params: list[Any] = [reviewer]
+    if commenter:
+        query = """
+            SELECT DISTINCT r.project_key || '/' || r.slug AS repo
+            FROM pull_requests pr
+            JOIN repos r ON r.id = pr.repo_id
+            WHERE EXISTS (
+                SELECT 1 FROM pr_comments c
+                WHERE c.repo_id = pr.repo_id AND c.pr_id = pr.pr_id AND c.author = ?
+            )
+        """
+        params: list[Any] = [commenter]
+    else:
+        query = """
+            SELECT DISTINCT r.project_key || '/' || r.slug AS repo
+            FROM pull_requests pr
+            JOIN repos r ON r.id = pr.repo_id
+            WHERE EXISTS (
+                SELECT 1 FROM json_each(pr.reviewers) WHERE value = ?
+            )
+        """
+        params = [reviewer]
 
     if since_ts:
         query += " AND pr.created_date >= ?"
