@@ -406,6 +406,69 @@ judge:
 
 ---
 
+### `select-golden` — отбор эталонных PR для бенчмарка
+
+Находит высококачественные PR с разнообразными и глубокими замечаниями — пригодные для тестирования AI-код-ревьюверов.
+
+**Пайплайн (управляется `--steps`):**
+
+```
+heuristic → classify → score → judge
+```
+
+| Шаг | Что делает | LLM? |
+|---|---|---|
+| `heuristic` | SQL-фильтр по времени жизни, ревьюверам, числу комментариев | нет |
+| `classify` | Классифицирует каждый комментарий: тип (10 классов) + глубина (1-3) | да |
+| `score` | Вычисляет составной скор PR из классификаций | нет |
+| `judge` | Финальный вердикт GOLD / SILVER / REJECT на топ-N% | да |
+
+**Типы замечаний:** `СТИЛЬ`, `ПОВЕРХНОСТНАЯ_ЛОГИКА`, `ГЛУБОКАЯ_ЛОГИКА`, `АРХИТЕКТУРА`, `ПРОИЗВОДИТЕЛЬНОСТЬ`, `БЕЗОПАСНОСТЬ`, `ТЕСТЫ`, `БИЗНЕС_ЛОГИКА`, `УСТОЙЧИВОСТЬ`, `ЧИТАЕМОСТЬ`
+
+**Скор PR** (0..1) — взвешенная сумма:
+- Разноплановость (25%): уникальных типов / 3
+- Глубина (25%): средняя глубина комментариев
+- Принятие (30%): доля `yes` из `analyze-feedback`, если запускался
+- Отсутствие стилистического шума (15%)
+- Нормализованный размер PR (15%)
+
+```bash
+# Быстрый просмотр кандидатов — только эвристика (без LLM, мгновенно)
+.venv/bin/python pr_analytics.py select-golden \
+  --projects PROJ1,PROJ2 --since 2025-01-01 \
+  --steps heuristic
+
+# Полный пайплайн с бюджетом
+.venv/bin/python pr_analytics.py select-golden \
+  --projects PROJ1,PROJ2 --since 2025-01-01 \
+  --steps heuristic,classify,score,judge \
+  --budget-classify 200000 --budget-judge 50000 \
+  --change-judge-model deepseek-chat \
+  --output output/golden.html
+```
+
+| Параметр | Описание |
+|---|---|
+| `--steps` | Шаги пайплайна через запятую (default: все) |
+| `--classifier-model` | LLM для классификации комментариев (default: из конфига) |
+| `--judge-model` | LLM для финального вердикта GOLD/SILVER/REJECT |
+| `--change-judge-model` | Judge model из `analyze-feedback` для `change_score` |
+| `--top-pct` | Топ N% по скору отправляется на финального судью (default: 20) |
+| `--budget-tokens` | Общий лимит токенов на запуск |
+| `--budget-classify` | Лимит токенов на шаг classify |
+| `--budget-judge` | Лимит токенов на шаг judge |
+| `--max-comment-chars` | Обрезка текста комментария (default: 1500) |
+| `--min-lifetime-h` / `--max-lifetime-h` | Время жизни PR в часах (default: 4–120) |
+| `--min-reviewers` | Минимум ревьюверов (default: 2) |
+| `--min-comments` / `--max-comments` | Диапазон числа комментариев (default: 3–30) |
+| `--output` | HTML-отчёт (default: `output/golden.html`) |
+
+**HTML-отчёт** содержит: воронку фильтрации, scatter-диаграмму (разнообразие vs глубина), распределение типов комментариев и таблицу PR с вердиктами.
+
+Пайплайн **идемпотентен** — повторный запуск пропускает уже классифицированные комментарии и PR с вердиктом. Промежуточные результаты сохраняются в `comment_classification` и `pr_scores`.
+
+---
+
 ## Примеры сценариев
 
 ### Кеш + график за квартал
@@ -478,11 +541,21 @@ bitbucket_cache.db
 ├── pr_comments       id, repo_id, pr_id, parent_id, author, text,
 │                     created_date, updated_date, severity, state,
 │                     file_path, line, line_type, file_type
-├── comment_reactions comment_id, author, emoji
-└── comment_analysis  comment_id, judge_model, verdict, confidence,
-                      reasoning, analyzed_at
+├── comment_reactions      comment_id, author, emoji
+├── comment_analysis       comment_id, judge_model, verdict, confidence,
+│                          reasoning, analyzed_at
+├── comment_classification comment_id, classifier_model, comment_type,
+│                          depth, confidence, classified_at
+├── pr_diff_stats          repo_id, pr_id, lines_added, lines_deleted,
+│                          files_changed, test_config_ratio, fetched_at
+└── pr_scores              repo_id, pr_id, scorer_model, diversity_score,
+                           depth_score, change_score_ratio, style_noise_score,
+                           size_score, total_score, verdict, verdict_reasoning,
+                           scored_at
 ```
 
 `reviewers` — JSON-массив slug'ов, доступен через `json_each()` в SQL-запросах.
 
 `comment_analysis.verdict` — `yes` / `no` / `unclear` (PRIMARY KEY: `comment_id + judge_model`).
+
+`pr_scores.verdict` — `GOLD` / `SILVER` / `REJECT` (PRIMARY KEY: `repo_id + pr_id + scorer_model`).

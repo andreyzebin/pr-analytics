@@ -35,6 +35,11 @@ class LLMJudge:
         verdict.tokens_used = tokens
         return verdict
 
+    def call_json(self, prompt: str) -> tuple[dict, int]:
+        """Generic call: returns (parsed_dict, tokens_used). Use for non-verdict schemas."""
+        raw, tokens = self._call(prompt)
+        return self._parse_json(raw), tokens
+
     def _call(self, prompt: str) -> tuple[str, int]:
         """Returns (response_text, total_tokens_used)."""
         if self._base_url:
@@ -64,23 +69,25 @@ class LLMJudge:
             return msg.content[0].text, tokens
 
     @staticmethod
-    def _parse(raw: str) -> JudgeVerdict:
+    def _parse_json(raw: str) -> dict:
+        """Parse JSON from LLM response, stripping markdown fences."""
         text = raw.strip()
-        # Strip markdown code blocks if present
         if text.startswith("```"):
             lines = text.split("\n")
             text = "\n".join(lines[1:])
             if text.endswith("```"):
                 text = text[:-3]
         try:
-            data = json.loads(text)
+            return json.loads(text)
         except json.JSONDecodeError:
             m = re.search(r"\{.*\}", text, re.DOTALL)
             if m:
-                data = json.loads(m.group())
-            else:
-                raise ValueError(f"Cannot parse judge response: {raw[:300]}")
+                return json.loads(m.group())
+            raise ValueError(f"Cannot parse judge response: {raw[:300]}")
 
+    @staticmethod
+    def _parse(raw: str) -> JudgeVerdict:
+        data = LLMJudge._parse_json(raw)
         verdict = str(data.get("verdict", "unclear")).lower()
         if verdict not in ("yes", "no", "unclear"):
             verdict = "unclear"

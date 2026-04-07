@@ -78,6 +78,50 @@ CREATE TABLE IF NOT EXISTS comment_analysis (
     FOREIGN KEY (comment_id) REFERENCES pr_comments(id)
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_comment ON comment_analysis(comment_id);
+
+CREATE TABLE IF NOT EXISTS pr_diff_stats (
+    repo_id           INTEGER NOT NULL,
+    pr_id             INTEGER NOT NULL,
+    lines_added       INTEGER,
+    lines_deleted     INTEGER,
+    files_changed     INTEGER,
+    test_config_ratio REAL,
+    fetched_at        INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, pr_id),
+    FOREIGN KEY (repo_id, pr_id) REFERENCES pull_requests(repo_id, pr_id)
+);
+
+CREATE TABLE IF NOT EXISTS comment_classification (
+    comment_id       INTEGER NOT NULL,
+    classifier_model TEXT    NOT NULL,
+    comment_type     TEXT,
+    depth            INTEGER CHECK(depth IN (1,2,3)),
+    confidence       REAL,
+    classified_at    INTEGER NOT NULL,
+    PRIMARY KEY (comment_id, classifier_model),
+    FOREIGN KEY (comment_id) REFERENCES pr_comments(id)
+);
+CREATE INDEX IF NOT EXISTS idx_classification_comment ON comment_classification(comment_id);
+
+CREATE TABLE IF NOT EXISTS pr_scores (
+    repo_id            INTEGER NOT NULL,
+    pr_id              INTEGER NOT NULL,
+    scorer_model       TEXT    NOT NULL,
+    unique_types       INTEGER,
+    avg_depth          REAL,
+    diversity_score    REAL,
+    depth_score        REAL,
+    change_score_ratio REAL,
+    style_noise_score  REAL,
+    size_score         REAL,
+    total_score        REAL,
+    verdict            TEXT    CHECK(verdict IN ('GOLD','SILVER','REJECT')),
+    verdict_reasoning  TEXT,
+    scored_at          INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, pr_id, scorer_model),
+    FOREIGN KEY (repo_id, pr_id) REFERENCES pull_requests(repo_id, pr_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pr_scores_total ON pr_scores(total_score DESC);
 """
 
 

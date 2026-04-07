@@ -20,6 +20,7 @@ import logging
 import sys
 
 from pa.cmd_analyze import cmd_analyze_feedback
+from pa.cmd_select_golden import cmd_select_golden
 from pa.cmd_cache import cmd_cache
 from pa.cmd_feedback import cmd_review_feedback
 from pa.cmd_find_repos import cmd_find_repos
@@ -104,6 +105,41 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Show which comments would be analyzed, without calling the LLM")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
+    # ── select-golden ──────────────────────────────────────────────────────────
+    p = sub.add_parser("select-golden",
+                       help="Find high-quality PRs suitable as AI code reviewer benchmarks")
+    p.add_argument("--repos", help="Comma-separated PROJ/repo entries")
+    p.add_argument("--projects", help="Comma-separated project keys")
+    p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
+    p.add_argument("--since", help="Start date (YYYY-MM-DD)")
+    p.add_argument("--until", help="End date (YYYY-MM-DD)")
+    p.add_argument("--steps", default="heuristic,classify,score,judge",
+                   help="Pipeline steps to run: heuristic,classify,score,judge (default: all)")
+    p.add_argument("--classifier-model", default=None, dest="classifier_model",
+                   help=f"LLM model for comment classification (default: from config)")
+    p.add_argument("--judge-model", default=None, dest="judge_model",
+                   help="LLM model for final GOLD/SILVER/REJECT verdict (default: same as classifier)")
+    p.add_argument("--change-judge-model", default=None, dest="change_judge_model",
+                   help="Judge model used in analyze-feedback (for change_score lookup)")
+    p.add_argument("--top-pct", type=int, default=20, dest="top_pct",
+                   help="Top %% of scored PRs to send to final judge (default: 20)")
+    p.add_argument("--budget-tokens", type=int, default=None, dest="budget_tokens",
+                   help="Total token budget for the run (default: unlimited)")
+    p.add_argument("--budget-classify", type=int, default=None, dest="budget_classify",
+                   help="Token budget for classify step")
+    p.add_argument("--budget-judge", type=int, default=None, dest="budget_judge",
+                   help="Token budget for final judge step")
+    p.add_argument("--max-comment-chars", type=int, default=1500, dest="max_comment_chars",
+                   help="Truncate comment text to this length before sending to LLM (default: 1500)")
+    # Heuristic thresholds
+    p.add_argument("--min-lifetime-h", type=float, default=4, dest="min_lifetime_h")
+    p.add_argument("--max-lifetime-h", type=float, default=120, dest="max_lifetime_h")
+    p.add_argument("--min-reviewers", type=int, default=2, dest="min_reviewers")
+    p.add_argument("--min-comments", type=int, default=3, dest="min_comments")
+    p.add_argument("--max-comments", type=int, default=30, dest="max_comments")
+    p.add_argument("--output", default="output/golden.html", help="HTML report output path")
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
     # ── find-repos ─────────────────────────────────────────────────────────────
     p = sub.add_parser("find-repos", help="Find repos where user was a reviewer or commenter")
     p.add_argument("--reviewer", help="Find repos where slug is in formal reviewers list")
@@ -162,6 +198,7 @@ def main() -> None:
         "cache": cmd_cache,
         "plot": cmd_plot,
         "analyze-feedback": cmd_analyze_feedback,
+        "select-golden": cmd_select_golden,
         "find-repos": cmd_find_repos,
         "sql": cmd_sql,
         "status": cmd_status,
