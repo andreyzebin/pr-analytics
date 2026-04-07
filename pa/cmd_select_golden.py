@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from pa.config import (
-    resolve_db, resolve_judge_api_key, resolve_judge_base_url, resolve_judge_model,
+    resolve_db, resolve_judge_api_key, resolve_judge_base_url, resolve_judge_model, resolve_url,
 )
 from pa.db import open_db
 from pa.judge import LLMJudge
@@ -480,6 +480,12 @@ def _print_table(scored: list[dict]) -> None:
             print("\t".join(str(x) for x in r))
 
 
+def _pr_url(bb_url: str | None, project_key: str, slug: str, pr_id: int) -> str | None:
+    if not bb_url:
+        return None
+    return f"{bb_url.rstrip('/')}/projects/{project_key}/repos/{slug}/pull-requests/{pr_id}"
+
+
 def _generate_html_report(
     scored: list[dict],
     heuristic_count: int,
@@ -487,6 +493,7 @@ def _generate_html_report(
     output_path: Path,
     budget: BudgetTracker,
     steps_run: list[str],
+    bb_url: str | None = None,
 ) -> None:
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     gold   = [p for p in scored if p.get("verdict") == "GOLD"]
@@ -558,10 +565,12 @@ def _generate_html_report(
         change_str = f"{pr['change_score_ratio']:.0%}" if pr.get("change_score_ratio") is not None else "—"
         reasoning = pr.get("verdict_reasoning") or ""
         types_str = ", ".join(pr.get("types", []))
+        url = _pr_url(bb_url, pr["project_key"], pr["slug"], pr["pr_id"])
+        pr_link = f'<a href="{url}" target="_blank">{repo}#{pr["pr_id"]}</a>' if url else f"{repo}#{pr['pr_id']}"
         table_rows_html += f"""
         <tr style="background:{bg}">
           <td>{i}</td>
-          <td><strong>{repo}#{pr['pr_id']}</strong>
+          <td><strong>{pr_link}</strong>
               <br><small class="text-muted">{(pr.get('title') or '')[:70]}</small></td>
           <td><strong>{pr['total_score']:.2f}</strong></td>
           <td><details><summary>{pr['unique_types']} типов</summary>
@@ -657,6 +666,7 @@ Plotly.newPlot('types',
 
 def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
     db_path   = resolve_db(getattr(args, "db", None), cfg)
+    bb_url    = resolve_url(None, cfg)
     since_ts  = date_to_ms(args.since) if args.since else None
     until_ts  = date_to_ms(args.until, end_of_day=True) if args.until else None
     steps     = [s.strip() for s in args.steps.split(",")]
@@ -798,4 +808,5 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
             output_path=output,
             budget=budget,
             steps_run=steps,
+            bb_url=bb_url,
         )
