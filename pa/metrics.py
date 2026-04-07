@@ -171,7 +171,14 @@ METRICS: dict[str, MetricDef] = {
     "semantic_acceptance_rate": MetricDef(
         label="Semantic Acceptance Rate", unit="%", plot_kind="line",
         # compute=None — fetched separately in cmd_plot (requires --author + --judge-model)
-        # acceptance_rate = yes / (yes + no) × 100%, only among comments with feedback
+        # yes / (yes + no) × 100% — only among comments with feedback
+        compute=None,
+        fmt=lambda v: f"{v:.0f}%",
+    ),
+    "semantic_acceptance_rate_all": MetricDef(
+        label="Semantic Acceptance Rate (all)", unit="%", plot_kind="line",
+        # compute=None — fetched separately in cmd_plot (requires --author + --judge-model)
+        # yes / total_comments × 100% — denominator includes comments without any feedback
         compute=None,
         fmt=lambda v: f"{v:.0f}%",
     ),

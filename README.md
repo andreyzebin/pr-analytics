@@ -143,13 +143,15 @@ source .env
 | `time_to_first_comment` | лог | Медианное время до первого комментария от не-автора (часы) |
 | `agent_comments` | bar | Суммарное число корневых замечаний AI-агента за период (требует `--author`) |
 | `feedback_rate` | линейная | % замечаний агента, на которые отреагировали (реакция или ответ), требует `--author` |
-| `semantic_acceptance_rate` | линейная | % принятых замечаний среди тех с фидбеком (LLM-судья, требует `--author` + `--judge-model`) |
+| `semantic_acceptance_rate` | линейная | yes/(yes+no) — среди замечаний с фидбеком (LLM-судья, требует `--author`) |
+| `semantic_acceptance_rate_all` | линейная | yes/все_замечания — знаменатель включает замечания без фидбека (LLM-судья, требует `--author`) |
 
 Метрики можно комбинировать через запятую.
 
-Три метрики `agent_comments` + `feedback_rate` + `semantic_acceptance_rate` дают полную воронку эффективности AI-агента:
+Четыре метрики дают полную воронку эффективности AI-агента:
 ```
-все замечания → получили фидбек (feedback_rate) → приняты (semantic_acceptance_rate)
+agent_comments → feedback_rate → semantic_acceptance_rate
+                                 semantic_acceptance_rate_all  (реальное влияние на весь поток)
 ```
 
 #### Примеры
@@ -201,7 +203,7 @@ source .env
 .venv/bin/python pr_analytics.py plot \
   --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
   --type trend --period week \
-  --metrics agent_comments,feedback_rate,semantic_acceptance_rate \
+  --metrics agent_comments,feedback_rate,semantic_acceptance_rate,semantic_acceptance_rate_all \
   --author ai-review-bot \
   --split total \
   --layout stack --output output/agent_funnel.html

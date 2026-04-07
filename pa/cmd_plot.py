@@ -491,6 +491,50 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         metric_results["semantic_acceptance_rate"] = [(f"{author} ({judge_model})", sar_buckets)]
         all_buckets.update(sar_buckets.keys())
 
+    # ── semantic_acceptance_rate_all: yes / total_comments (incl. no-feedback) ─
+    if "semantic_acceptance_rate_all" in requested_metrics:
+        if not author_arg:
+            log.error("--author is required for semantic_acceptance_rate_all metric")
+            sys.exit(1)
+        judge_model_all = resolve_judge_model(getattr(args, "judge_model", None), cfg)
+        conn_sara = open_db(db_path)
+        # yes verdicts per bucket
+        sara_yes_rows = conn_sara.execute("""
+            SELECT pr.closed_date, COUNT(*) AS cnt
+            FROM comment_analysis ca
+            JOIN pr_comments c ON c.id = ca.comment_id
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND ca.judge_model = ? AND ca.verdict = 'yes'
+              AND pr.closed_date IS NOT NULL
+            GROUP BY pr.closed_date
+        """, (author_arg, judge_model_all)).fetchall()
+        # total root comments per bucket (all, regardless of feedback)
+        sara_total_rows = conn_sara.execute("""
+            SELECT pr.closed_date, COUNT(*) AS cnt
+            FROM pr_comments c
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
+            GROUP BY pr.closed_date
+        """, (author_arg,)).fetchall()
+        conn_sara.close()
+
+        yes_per_bk: dict[str, int] = {}
+        for r in sara_yes_rows:
+            bk = bucket_key(r["closed_date"], period)
+            yes_per_bk[bk] = yes_per_bk.get(bk, 0) + r["cnt"]
+        total_per_bk_all: dict[str, int] = {}
+        for r in sara_total_rows:
+            bk = bucket_key(r["closed_date"], period)
+            total_per_bk_all[bk] = total_per_bk_all.get(bk, 0) + r["cnt"]
+        sara_buckets = {
+            bk: yes_per_bk.get(bk, 0) / total * 100
+            for bk, total in total_per_bk_all.items() if total > 0
+        }
+        metric_results["semantic_acceptance_rate_all"] = [
+            (f"{author_arg} ({judge_model_all})", sara_buckets)
+        ]
+        all_buckets.update(sara_buckets.keys())
+
     # ── feedback_rate: comments_with_feedback / total_comments per period ─────
     if "feedback_rate" in requested_metrics:
         if not author_arg:
@@ -533,7 +577,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         all_buckets.update(fr_buckets.keys())
 
     for metric_name in requested_metrics:
-        if metric_name in ("semantic_acceptance_rate", "feedback_rate"):
+        if metric_name in ("semantic_acceptance_rate", "semantic_acceptance_rate_all", "feedback_rate"):
             continue  # already handled above
         mdef = METRICS[metric_name]
         series_data = []
