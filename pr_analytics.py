@@ -19,13 +19,14 @@ import argparse
 import logging
 import sys
 
+from pa.cmd_analyze import cmd_analyze_feedback
 from pa.cmd_cache import cmd_cache
 from pa.cmd_feedback import cmd_review_feedback
 from pa.cmd_find_repos import cmd_find_repos
 from pa.cmd_plot import cmd_plot
 from pa.cmd_sql import cmd_sql
 from pa.cmd_status import cmd_status
-from pa.config import DEFAULT_CONCURRENCY, DEFAULT_DB, load_config
+from pa.config import DEFAULT_CONCURRENCY, DEFAULT_DB, DEFAULT_JUDGE_MODEL, load_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,11 +72,36 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated metrics for trend: cycle_time, acceptance_rate, throughput"
                         " (default: cycle_time)")
     p.add_argument("--split", default=None, metavar="KIND:VALUE",
-                   help="Split into two series: reviewer:<slug> (in reviewers list) "
-                        "or commenter:<slug> (left at least one comment)")
+                   help="Series mode: reviewer:<slug>, commenter:<slug>, "
+                        "or total[:<label>] (aggregate all repos into one series)")
     p.add_argument("--layout", default="stack", choices=["stack", "overlay"],
                    help="Layout when multiple metrics: stack (default) or overlay (dual y-axis, max 2 metrics)")
+    p.add_argument("--author", default=None,
+                   help="AI agent slug — required for semantic_acceptance_rate metric")
+    p.add_argument("--judge-model", default=None, dest="judge_model",
+                   help=f"LLM judge model for semantic_acceptance_rate (default: {DEFAULT_JUDGE_MODEL})")
     p.add_argument("--output", default="output/chart.png", help="Output file (.png/.svg)")
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
+    # ── analyze-feedback ───────────────────────────────────────────────────────
+    p = sub.add_parser("analyze-feedback",
+                       help="Run LLM judge on AI-agent comments to measure semantic acceptance rate")
+    p.add_argument("--author", required=True, help="AI agent slug whose comments to analyze")
+    p.add_argument("--since", help="Start date (YYYY-MM-DD) — filters on PR created_date")
+    p.add_argument("--until", help="End date (YYYY-MM-DD) — filters on PR created_date")
+    p.add_argument("--repos", help="Comma-separated PROJ/repo entries")
+    p.add_argument("--projects", help="Comma-separated project keys")
+    p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
+    p.add_argument("--judge-model", default=None, dest="judge_model",
+                   help=f"LLM judge model (default: {DEFAULT_JUDGE_MODEL})")
+    p.add_argument("--batch-size", type=int, default=50, dest="batch_size",
+                   help="Max comments to process per run (default: 50, 0 = unlimited)")
+    p.add_argument("--budget-tokens", type=int, default=None, dest="budget_tokens",
+                   help="Stop when total tokens consumed exceeds this limit (default: unlimited)")
+    p.add_argument("--max-comment-chars", type=int, default=2000, dest="max_comment_chars",
+                   help="Truncate comment text to this length before sending to LLM (default: 2000)")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="Show which comments would be analyzed, without calling the LLM")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
     # ── find-repos ─────────────────────────────────────────────────────────────
@@ -134,6 +160,7 @@ def main() -> None:
     commands = {
         "cache": cmd_cache,
         "plot": cmd_plot,
+        "analyze-feedback": cmd_analyze_feedback,
         "find-repos": cmd_find_repos,
         "sql": cmd_sql,
         "status": cmd_status,

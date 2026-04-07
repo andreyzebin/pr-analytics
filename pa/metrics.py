@@ -86,6 +86,18 @@ def _total_prs(rows, period: str, state: str) -> dict[str, float]:
     return dict(buckets)
 
 
+def _agent_comments(rows, period: str, state: str) -> dict[str, float]:
+    """Total root comments by agent per period, bucketed by closed_date."""
+    buckets: dict[str, float] = defaultdict(float)
+    for r in rows:
+        if r["state"] not in ("MERGED", "DECLINED") or not r["closed_date"]:
+            continue
+        cnt = r.get("agent_comment_count")
+        if cnt:
+            buckets[bucket_key(r["closed_date"], period)] += cnt
+    return dict(buckets)
+
+
 def _time_to_first_comment(rows, period: str, state: str) -> dict[str, float]:
     """Median hours from PR creation to first non-author comment, bucketed by closed_date.
 
@@ -139,5 +151,28 @@ METRICS: dict[str, MetricDef] = {
                and r.get("created_date") and r["first_comment_date"] >= r["created_date"]
             else None
         ),
+    ),
+    "agent_comments": MetricDef(
+        label="Agent Comments", unit="count", plot_kind="bar",
+        compute=_agent_comments, fmt=lambda v: str(int(v)),
+        row_value=lambda r, state: (
+            r.get("agent_comment_count")
+            if r.get("state") in ("MERGED", "DECLINED") and r.get("closed_date")
+            else None
+        ),
+    ),
+    "feedback_rate": MetricDef(
+        label="Feedback Rate", unit="%", plot_kind="line",
+        # compute=None — fetched separately in cmd_plot (requires --author)
+        # feedback_rate = comments_with_feedback / total_comments × 100%
+        compute=None,
+        fmt=lambda v: f"{v:.0f}%",
+    ),
+    "semantic_acceptance_rate": MetricDef(
+        label="Semantic Acceptance Rate", unit="%", plot_kind="line",
+        # compute=None — fetched separately in cmd_plot (requires --author + --judge-model)
+        # acceptance_rate = yes / (yes + no) × 100%, only among comments with feedback
+        compute=None,
+        fmt=lambda v: f"{v:.0f}%",
     ),
 }

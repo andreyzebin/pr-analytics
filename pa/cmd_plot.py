@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pa.config import resolve_db
+from pa.config import resolve_db, resolve_judge_model
 from pa.db import open_db
-from pa.metrics import METRICS, MetricDef, fmt_hours
+from pa.metrics import METRICS, MetricDef, bucket_key, fmt_hours
 from pa.utils import collect_repos_from_args, date_to_ms, ms_to_date
 
 log = logging.getLogger(__name__)
@@ -39,7 +39,8 @@ def _build_series(
     if split_arg is None:
         return [Series(label=lbl, rows=rows) for lbl, rows in raw_per_repo.items()]
 
-    kind, value = split_arg.split(":", 1)
+    parts = split_arg.split(":", 1)
+    kind, value = parts[0], parts[1] if len(parts) > 1 else ""
     all_rows = [r for rows in raw_per_repo.values() for r in rows]
 
     if kind == "reviewer":
@@ -61,7 +62,15 @@ def _build_series(
             Series(label=f"∉ {slug}", rows=without_rows),
         ]
 
-    log.error("Unsupported --split kind %r. Supported: reviewer:<slug>, commenter:<slug>", kind)
+    if kind == "total":
+        # Aggregate all repos into one series
+        label = value if value else "Total"
+        return [Series(label=label, rows=all_rows)]
+
+    log.error(
+        "Unsupported --split kind %r. Supported: reviewer:<slug>, commenter:<slug>, total[:<label>]",
+        kind,
+    )
     sys.exit(1)
 
 
@@ -289,6 +298,20 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         if rows:
             raw_per_repo[label] = [dict(r) for r in rows]
 
+    # ── Augment with agent_comment_count (separate query) ────────────────────
+    author_arg = getattr(args, "author", None)
+    if "agent_comments" in requested_metrics and raw_per_repo and author_arg:
+        ac_rows = conn.execute("""
+            SELECT repo_id, pr_id, COUNT(*) AS cnt
+            FROM pr_comments
+            WHERE author = ? AND parent_id IS NULL
+            GROUP BY repo_id, pr_id
+        """, (author_arg,)).fetchall()
+        ac_map = {(r["repo_id"], r["pr_id"]): r["cnt"] for r in ac_rows}
+        for rows_list in raw_per_repo.values():
+            for d in rows_list:
+                d["agent_comment_count"] = ac_map.get((d["repo_id"], d["pr_id"]), 0)
+
     # ── Augment with first_comment_date (separate query, no JOIN) ─────────────
     if "time_to_first_comment" in requested_metrics and raw_per_repo:
         fcd_rows = conn.execute("""
@@ -431,7 +454,87 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     all_buckets: set[str] = set()
     metric_results: dict[str, list[tuple[str, dict]]] = {}
 
+    # ── semantic_acceptance_rate: special fetch from comment_analysis ──────────
+    if "semantic_acceptance_rate" in requested_metrics:
+        author = getattr(args, "author", None)
+        if not author:
+            log.error("--author is required for semantic_acceptance_rate metric")
+            sys.exit(1)
+        judge_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
+        conn2 = open_db(db_path)
+        # Fetch all analyzed comments for this author+judge, joined to PR closed_date
+        sar_rows = conn2.execute("""
+            SELECT ca.verdict, pr.closed_date, pr.repo_id, pr.pr_id
+            FROM comment_analysis ca
+            JOIN pr_comments c ON c.id = ca.comment_id
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND ca.judge_model = ?
+              AND pr.closed_date IS NOT NULL
+        """, (author, judge_model)).fetchall()
+        conn2.close()
+
+        # Build a set of (repo_id, pr_id) per series, then compute rate per bucket
+        # semantic_acceptance_rate is not split-aware — one global series
+        yes_buckets: dict[str, int] = {}
+        total_buckets: dict[str, int] = {}
+        for r in sar_rows:
+            if r["verdict"] not in ("yes", "no"):
+                continue
+            bk = bucket_key(r["closed_date"], period)
+            total_buckets[bk] = total_buckets.get(bk, 0) + 1
+            if r["verdict"] == "yes":
+                yes_buckets[bk] = yes_buckets.get(bk, 0) + 1
+        sar_buckets = {
+            bk: yes_buckets.get(bk, 0) / total_buckets[bk] * 100
+            for bk in total_buckets
+        }
+        metric_results["semantic_acceptance_rate"] = [(f"{author} ({judge_model})", sar_buckets)]
+        all_buckets.update(sar_buckets.keys())
+
+    # ── feedback_rate: comments_with_feedback / total_comments per period ─────
+    if "feedback_rate" in requested_metrics:
+        if not author_arg:
+            log.error("--author is required for feedback_rate metric")
+            sys.exit(1)
+        conn3 = open_db(db_path)
+        total_rows = conn3.execute("""
+            SELECT c.repo_id, c.pr_id, pr.closed_date, COUNT(*) AS cnt
+            FROM pr_comments c
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
+            GROUP BY c.repo_id, c.pr_id
+        """, (author_arg,)).fetchall()
+        fb_rows = conn3.execute("""
+            SELECT c.repo_id, c.pr_id, pr.closed_date, COUNT(*) AS cnt
+            FROM pr_comments c
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
+              AND (
+                  EXISTS (SELECT 1 FROM comment_reactions cr WHERE cr.comment_id = c.id)
+                  OR EXISTS (SELECT 1 FROM pr_comments reply
+                             WHERE reply.parent_id = c.id AND reply.author != ?)
+              )
+            GROUP BY c.repo_id, c.pr_id
+        """, (author_arg, author_arg)).fetchall()
+        conn3.close()
+
+        from collections import defaultdict as _dd
+        total_per_bk: dict[str, int] = _dd(int)
+        fb_per_bk: dict[str, int] = _dd(int)
+        for r in total_rows:
+            total_per_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
+        for r in fb_rows:
+            fb_per_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
+        fr_buckets = {
+            bk: fb_per_bk.get(bk, 0) / total * 100
+            for bk, total in total_per_bk.items() if total > 0
+        }
+        metric_results["feedback_rate"] = [(author_arg, fr_buckets)]
+        all_buckets.update(fr_buckets.keys())
+
     for metric_name in requested_metrics:
+        if metric_name in ("semantic_acceptance_rate", "feedback_rate"):
+            continue  # already handled above
         mdef = METRICS[metric_name]
         series_data = []
         for series in series_list:
@@ -512,6 +615,14 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         title = " + ".join(METRICS[m].label for m in requested_metrics)
         axes[0].set_title(f"{title} by {period_label} ({state})")
         plt.tight_layout()
+
+    # ── Print totals for count-based metrics ─────────────────────────────────
+    for mname in requested_metrics:
+        if METRICS[mname].plot_kind == "bar":
+            for label, buckets in metric_results[mname]:
+                total_val = sum(buckets.values())
+                if total_val:
+                    print(f"{METRICS[mname].label}  [{label}]  total={METRICS[mname].fmt(total_val)}")
 
     out_path = Path(output)
     if out_path.suffix.lower() == ".html":

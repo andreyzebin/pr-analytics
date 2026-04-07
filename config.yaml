@@ -19,3 +19,13 @@ cache:
 
   # Number of parallel threads for fetching repos/PRs
   concurrency: 4
+
+judge:
+  # Model used as LLM judge for analyze-feedback command
+  model: "claude-opus-4-6"
+
+  # Anthropic API key — set via env var
+  api_key: "${ANTHROPIC_API_KEY}"
+
+  # Optional: OpenAI-compatible base URL (leave empty for Anthropic)
+  # base_url: "https://api.openai.com/v1"

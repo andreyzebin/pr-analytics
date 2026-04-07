@@ -66,6 +66,18 @@ CREATE TABLE IF NOT EXISTS comment_reactions (
     FOREIGN KEY(comment_id) REFERENCES pr_comments(id)
 );
 CREATE INDEX IF NOT EXISTS idx_reactions_comment ON comment_reactions(comment_id);
+
+CREATE TABLE IF NOT EXISTS comment_analysis (
+    comment_id   INTEGER NOT NULL,
+    judge_model  TEXT    NOT NULL,
+    verdict      TEXT    NOT NULL CHECK(verdict IN ('yes','no','unclear')),
+    confidence   TEXT    CHECK(confidence IN ('high','medium','low')),
+    reasoning    TEXT,
+    analyzed_at  INTEGER NOT NULL,
+    PRIMARY KEY (comment_id, judge_model),
+    FOREIGN KEY (comment_id) REFERENCES pr_comments(id)
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_comment ON comment_analysis(comment_id);
 """
 
 
