@@ -113,8 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
     p.add_argument("--since", help="Start date (YYYY-MM-DD)")
     p.add_argument("--until", help="End date (YYYY-MM-DD)")
-    p.add_argument("--steps", default="heuristic,classify,score,judge",
-                   help="Pipeline steps to run: heuristic,classify,score,judge (default: all)")
+    p.add_argument("--steps", default="heuristic,classify,analyze,score,judge",
+                   help="Pipeline steps: heuristic,classify,analyze,score,judge (default: all)")
     p.add_argument("--classifier-model", default=None, dest="classifier_model",
                    help=f"LLM model for comment classification (default: from config)")
     p.add_argument("--judge-model", default=None, dest="judge_model",
@@ -127,6 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Total token budget for the run (default: unlimited)")
     p.add_argument("--budget-classify", type=int, default=None, dest="budget_classify",
                    help="Token budget for classify step")
+    p.add_argument("--budget-analyze", type=int, default=None, dest="budget_analyze",
+                   help="Token budget for analyze step (comment acceptance)")
     p.add_argument("--budget-judge", type=int, default=None, dest="budget_judge",
                    help="Token budget for final judge step")
     p.add_argument("--max-comment-chars", type=int, default=1500, dest="max_comment_chars",

@@ -413,14 +413,15 @@ judge:
 **Пайплайн (управляется `--steps`):**
 
 ```
-heuristic → classify → score → judge
+heuristic → classify → analyze → score → judge
 ```
 
 | Шаг | Что делает | LLM? |
 |---|---|---|
 | `heuristic` | SQL-фильтр по времени жизни, ревьюверам, числу комментариев | нет |
 | `classify` | Классифицирует каждый комментарий: тип (10 классов) + глубина (1-3) | да |
-| `score` | Вычисляет составной скор PR из классификаций | нет |
+| `analyze` | Оценивает принятие комментариев (yes/no/unclear) — автоматически для непроанализированных | да |
+| `score` | Вычисляет составной скор PR из классификаций + вердиктов | нет |
 | `judge` | Финальный вердикт GOLD / SILVER / REJECT на топ-N% | да |
 
 **Типы замечаний:** `СТИЛЬ`, `ПОВЕРХНОСТНАЯ_ЛОГИКА`, `ГЛУБОКАЯ_ЛОГИКА`, `АРХИТЕКТУРА`, `ПРОИЗВОДИТЕЛЬНОСТЬ`, `БЕЗОПАСНОСТЬ`, `ТЕСТЫ`, `БИЗНЕС_ЛОГИКА`, `УСТОЙЧИВОСТЬ`, `ЧИТАЕМОСТЬ`
@@ -441,9 +442,8 @@ heuristic → classify → score → judge
 # Полный пайплайн с бюджетом
 .venv/bin/python pr_analytics.py select-golden \
   --projects PROJ1,PROJ2 --since 2025-01-01 \
-  --steps heuristic,classify,score,judge \
-  --budget-classify 200000 --budget-judge 50000 \
-  --change-judge-model deepseek-chat \
+  --steps heuristic,classify,analyze,score,judge \
+  --budget-classify 200000 --budget-analyze 100000 --budget-judge 50000 \
   --output output/golden.html
 ```
 
@@ -452,10 +452,11 @@ heuristic → classify → score → judge
 | `--steps` | Шаги пайплайна через запятую (default: все) |
 | `--classifier-model` | LLM для классификации комментариев (default: из конфига) |
 | `--judge-model` | LLM для финального вердикта GOLD/SILVER/REJECT |
-| `--change-judge-model` | Judge model из `analyze-feedback` для `change_score` |
+| `--change-judge-model` | Judge model для `change_score` (default: classifier-model) |
 | `--top-pct` | Топ N% по скору отправляется на финального судью (default: 20) |
 | `--budget-tokens` | Общий лимит токенов на запуск |
 | `--budget-classify` | Лимит токенов на шаг classify |
+| `--budget-analyze` | Лимит токенов на шаг analyze |
 | `--budget-judge` | Лимит токенов на шаг judge |
 | `--max-comment-chars` | Обрезка текста комментария (default: 1500) |
 | `--min-lifetime-h` / `--max-lifetime-h` | Время жизни PR в часах (default: 4–120) |
@@ -465,7 +466,9 @@ heuristic → classify → score → judge
 
 **HTML-отчёт** содержит: воронку фильтрации, scatter-диаграмму (разнообразие vs глубина), распределение типов комментариев и таблицу PR с вердиктами.
 
-Пайплайн **идемпотентен** — повторный запуск пропускает уже классифицированные комментарии и PR с вердиктом. Промежуточные результаты сохраняются в `comment_classification` и `pr_scores`.
+Пайплайн **идемпотентен** — повторный запуск пропускает уже классифицированные и проанализированные комментарии. Промежуточные результаты сохраняются в `comment_classification`, `comment_analysis` и `pr_scores`.
+
+Шаг `analyze` автоматически оценивает комментарии, у которых есть реакции или ответы, но нет записи в `comment_analysis` — не требует отдельного запуска `analyze-feedback`.
 
 ---
 

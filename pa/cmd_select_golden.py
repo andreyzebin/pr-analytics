@@ -4,6 +4,7 @@ select-golden: Find high-quality PRs suitable as evaluation benchmarks for AI co
 Pipeline (--steps controls which phases run):
   heuristic — fast SQL filtering from cache (lifetime, reviewers, comments)
   classify  — LLM classification of comment type + depth per comment
+  analyze   — LLM judge on unanalyzed comments (reuses analyze-feedback logic)
   score     — compute composite PR score from classifications (no LLM)
   judge     — final LLM verdict (GOLD / SILVER / REJECT) on top candidates
 """
@@ -48,15 +49,19 @@ SURFACE_TYPES = {"СТИЛЬ", "ПОВЕРХНОСТНАЯ_ЛОГИКА"}
 class BudgetTracker:
     total_limit:    int | None = None
     classify_limit: int | None = None
+    analyze_limit:  int | None = None
     judge_limit:    int | None = None
     total_used:    int = 0
     classify_used: int = 0
+    analyze_used:  int = 0
     judge_used:    int = 0
 
     def add(self, tokens: int, step: str = "other") -> None:
         self.total_used += tokens
         if step == "classify":
             self.classify_used += tokens
+        elif step == "analyze":
+            self.analyze_used += tokens
         elif step == "judge":
             self.judge_used += tokens
 
@@ -64,6 +69,8 @@ class BudgetTracker:
         if self.total_limit and self.total_used >= self.total_limit:
             return False
         if step == "classify" and self.classify_limit and self.classify_used >= self.classify_limit:
+            return False
+        if step == "analyze" and self.analyze_limit and self.analyze_used >= self.analyze_limit:
             return False
         if step == "judge" and self.judge_limit and self.judge_used >= self.judge_limit:
             return False
@@ -73,6 +80,8 @@ class BudgetTracker:
         parts = [f"total={self.total_used:,}"]
         if self.classify_used:
             parts.append(f"classify={self.classify_used:,}")
+        if self.analyze_used:
+            parts.append(f"analyze={self.analyze_used:,}")
         if self.judge_used:
             parts.append(f"judge={self.judge_used:,}")
         return "  ".join(parts) + " tokens"
@@ -147,73 +156,24 @@ def _heuristic_filter(
     return result
 
 
+# ── Live progress helper ──────────────────────────────────────────────────
+
+import shutil
+
+def _live(msg: str) -> None:
+    """Overwrite current terminal line with msg."""
+    w = shutil.get_terminal_size(fallback=(120, 24)).columns
+    sys.stdout.write(f"\r  {msg:<{w - 4}}")
+    sys.stdout.flush()
+
+def _live_done(msg: str) -> None:
+    """Print msg on a fresh line after _live calls."""
+    w = shutil.get_terminal_size(fallback=(120, 24)).columns
+    sys.stdout.write(f"\r  {msg:<{w - 4}}\n")
+    sys.stdout.flush()
+
+
 # ── Phase 2: Classify comments ──────────────────────────────────────────────
-
-def _classify_pr(
-    conn,
-    pr: dict,
-    judge: LLMJudge,
-    classifier_model: str,
-    template: str,
-    budget: BudgetTracker,
-    max_comment_chars: int,
-    now_ms: int,
-) -> int:
-    """Classify unclassified root comments for one PR. Returns count newly classified."""
-    unclassified = conn.execute("""
-        SELECT c.id, c.text, c.file_path, c.line
-        FROM pr_comments c
-        WHERE c.repo_id = ? AND c.pr_id = ?
-          AND c.parent_id IS NULL
-          AND c.author != ?
-          AND NOT EXISTS (
-              SELECT 1 FROM comment_classification cc
-              WHERE cc.comment_id = c.id AND cc.classifier_model = ?
-          )
-    """, (pr["repo_id"], pr["pr_id"], pr["author"], classifier_model)).fetchall()
-
-    n = 0
-    repo = f"{pr['project_key']}/{pr['slug']}"
-    for c in unclassified:
-        if not budget.ok("classify"):
-            break
-        text = (c["text"] or "")[:max_comment_chars].strip()
-        if not text:
-            continue
-        loc = ""
-        if c["file_path"]:
-            loc = f" [{c['file_path']}"
-            if c["line"]:
-                loc += f":{c['line']}"
-            loc += "]"
-        prompt = template.format(
-            pr_title=pr["title"] or "",
-            repo=repo,
-            location=loc,
-            comment_text=text,
-        )
-        try:
-            data, tokens = judge.call_json(prompt)
-            budget.add(tokens, "classify")
-            ctype = str(data.get("type", "")).strip().upper()
-            if ctype not in VALID_TYPES:
-                ctype = "ЧИТАЕМОСТЬ"  # fallback
-            depth = int(data.get("depth", 2))
-            if depth not in (1, 2, 3):
-                depth = 2
-            conf = float(data.get("confidence", 0.5))
-            conn.execute(
-                """INSERT OR REPLACE INTO comment_classification
-                   (comment_id, classifier_model, comment_type, depth, confidence, classified_at)
-                   VALUES (?,?,?,?,?,?)""",
-                (c["id"], classifier_model, ctype, depth, conf, now_ms),
-            )
-            conn.commit()
-            n += 1
-        except Exception as exc:
-            log.warning("Failed to classify comment %d: %s", c["id"], exc)
-    return n
-
 
 def _run_classify_step(
     conn,
@@ -227,25 +187,226 @@ def _run_classify_step(
     now_ms = int(time.time() * 1000)
     total_classified = 0
     start = time.monotonic()
+    n_cand = len(candidates)
 
     for i, pr in enumerate(candidates, 1):
         if not budget.ok("classify"):
-            print(f"\nClassify budget reached ({budget.classify_used:,} tokens). Stopping.")
+            _live_done(f"Classify budget reached ({budget.classify_used:,} tokens). Stopping.")
             break
         repo = f"{pr['project_key']}/{pr['slug']}"
-        n = _classify_pr(conn, pr, judge, classifier_model, template, budget, max_comment_chars, now_ms)
-        total_classified += n
+        pr_ref = f"{repo}#{pr['pr_id']}"
+
+        unclassified = conn.execute("""
+            SELECT c.id, c.text, c.file_path, c.line
+            FROM pr_comments c
+            WHERE c.repo_id = ? AND c.pr_id = ?
+              AND c.parent_id IS NULL
+              AND c.author != ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM comment_classification cc
+                  WHERE cc.comment_id = c.id AND cc.classifier_model = ?
+              )
+        """, (pr["repo_id"], pr["pr_id"], pr["author"], classifier_model)).fetchall()
+
+        n_total = len(unclassified)
+        if n_total == 0:
+            elapsed = time.monotonic() - start
+            eta = elapsed / i * (n_cand - i) if i < n_cand else 0
+            _live_done(
+                f"[{i}/{n_cand}]  {pr_ref:<35}  0 new (all cached)"
+                f"  [{int(elapsed)}s, ~{int(eta)}s left  {budget.classify_used:,}tok]"
+            )
+            continue
+
+        _live(f"[{i}/{n_cand}]  {pr_ref:<35}  classifying {n_total} comments...")
+
+        n_done = 0
+        for c in unclassified:
+            if not budget.ok("classify"):
+                break
+            text = (c["text"] or "")[:max_comment_chars].strip()
+            if not text:
+                continue
+            loc = ""
+            if c["file_path"]:
+                loc = f" [{c['file_path']}"
+                if c["line"]:
+                    loc += f":{c['line']}"
+                loc += "]"
+            prompt = template.format(
+                pr_title=pr["title"] or "",
+                repo=repo,
+                location=loc,
+                comment_text=text,
+            )
+            try:
+                data, tokens = judge.call_json(prompt)
+                budget.add(tokens, "classify")
+                ctype = str(data.get("type", "")).strip().upper()
+                if ctype not in VALID_TYPES:
+                    ctype = "ЧИТАЕМОСТЬ"
+                depth = int(data.get("depth", 2))
+                if depth not in (1, 2, 3):
+                    depth = 2
+                conf = float(data.get("confidence", 0.5))
+                conn.execute(
+                    """INSERT OR REPLACE INTO comment_classification
+                       (comment_id, classifier_model, comment_type, depth, confidence, classified_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (c["id"], classifier_model, ctype, depth, conf, now_ms),
+                )
+                conn.commit()
+                n_done += 1
+                total_classified += 1
+                _live(f"[{i}/{n_cand}]  {pr_ref:<35}  {n_done}/{n_total}  {ctype} depth={depth}")
+            except Exception as exc:
+                log.warning("Failed to classify comment %d: %s", c["id"], exc)
+
         elapsed = time.monotonic() - start
-        eta = elapsed / i * (len(candidates) - i) if i < len(candidates) else 0
-        print(
-            f"  [{i}/{len(candidates)}]  {repo}#{pr['pr_id']}"
-            f"  classified={n}  [{int(elapsed)}s, ~{int(eta)}s left"
-            f"  {budget.classify_used:,}tok]",
-            flush=True,
+        eta = elapsed / i * (n_cand - i) if i < n_cand else 0
+        _live_done(
+            f"[{i}/{n_cand}]  {pr_ref:<35}  {n_done}/{n_total} done"
+            f"  [{int(elapsed)}s, ~{int(eta)}s left  {budget.classify_used:,}tok]"
         )
 
     elapsed = time.monotonic() - start
-    print(f"Classify done: {total_classified} comments in {int(elapsed)}s  ({budget.summary()})")
+    print(f"  Classify done: {total_classified} comments in {int(elapsed)}s  ({budget.summary()})")
+
+
+# ── Phase 2b: Analyze (acceptance verdict for unanalyzed comments) ──────────
+
+_ACCEPTANCE_PROMPT = Path(__file__).parent / "prompts" / "judge_acceptance.txt"
+
+
+def _run_analyze_step(
+    conn,
+    candidates: list[dict],
+    judge: LLMJudge,
+    analyze_model: str,
+    budget: BudgetTracker,
+    max_comment_chars: int,
+) -> None:
+    from pa.cmd_analyze import _build_prompt
+
+    template = _ACCEPTANCE_PROMPT.read_text(encoding="utf-8")
+    now_ms = int(time.time() * 1000)
+    total_analyzed = 0
+    n_yes = n_no = n_unclear = 0
+    start = time.monotonic()
+    n_cand = len(candidates)
+
+    for i, pr in enumerate(candidates, 1):
+        if not budget.ok("analyze"):
+            _live_done(f"Analyze budget reached ({budget.summary()}). Stopping.")
+            break
+        repo = f"{pr['project_key']}/{pr['slug']}"
+        pr_ref = f"{repo}#{pr['pr_id']}"
+
+        unanalyzed = conn.execute("""
+            SELECT c.id, c.text, c.severity, c.file_path, c.line, c.author
+            FROM pr_comments c
+            WHERE c.repo_id = ? AND c.pr_id = ?
+              AND c.parent_id IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM comment_analysis ca
+                  WHERE ca.comment_id = c.id AND ca.judge_model = ?
+              )
+              AND (
+                  EXISTS (SELECT 1 FROM comment_reactions cr WHERE cr.comment_id = c.id)
+                  OR EXISTS (SELECT 1 FROM pr_comments reply
+                             WHERE reply.parent_id = c.id AND reply.author != c.author)
+              )
+        """, (pr["repo_id"], pr["pr_id"], analyze_model)).fetchall()
+
+        n_total = len(unanalyzed)
+        if n_total == 0:
+            elapsed = time.monotonic() - start
+            eta = elapsed / i * (n_cand - i) if i < n_cand else 0
+            _live_done(
+                f"[{i}/{n_cand}]  {pr_ref:<35}  0 new (all cached)"
+                f"  [{int(elapsed)}s, ~{int(eta)}s left  {budget.analyze_used:,}tok]"
+            )
+            continue
+
+        _live(f"[{i}/{n_cand}]  {pr_ref:<35}  analyzing {n_total} comments...")
+
+        n_done = 0
+        pr_yes = pr_no = pr_unclear = 0
+        for c in unanalyzed:
+            if not budget.ok("analyze"):
+                break
+            text = (c["text"] or "")[:max_comment_chars].strip()
+            if not text:
+                continue
+
+            comment_author = c["author"]
+            reactions = [
+                (r["author"], r["emoji"])
+                for r in conn.execute(
+                    "SELECT author, emoji FROM comment_reactions WHERE comment_id = ?",
+                    (c["id"],),
+                ).fetchall()
+            ]
+            replies = [
+                (r["author"], r["text"])
+                for r in conn.execute(
+                    """SELECT author, text FROM pr_comments
+                       WHERE parent_id = ? AND author != ?
+                       ORDER BY created_date""",
+                    (c["id"], comment_author),
+                ).fetchall()
+            ]
+
+            prompt = _build_prompt(
+                template=template,
+                pr_title=pr["title"] or "",
+                repo=repo,
+                severity=c["severity"] or "NORMAL",
+                file_path=c["file_path"],
+                line=c["line"],
+                comment_text=text,
+                reactions=reactions,
+                replies=replies,
+            )
+            try:
+                verdict = judge.judge(prompt)
+                budget.add(verdict.tokens_used, "analyze")
+                conn.execute(
+                    """INSERT OR REPLACE INTO comment_analysis
+                       (comment_id, judge_model, verdict, confidence, reasoning, analyzed_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (c["id"], analyze_model, verdict.verdict, verdict.confidence,
+                     verdict.reasoning, now_ms),
+                )
+                conn.commit()
+                n_done += 1
+                total_analyzed += 1
+                if verdict.verdict == "yes":
+                    pr_yes += 1; n_yes += 1
+                elif verdict.verdict == "no":
+                    pr_no += 1; n_no += 1
+                else:
+                    pr_unclear += 1; n_unclear += 1
+                _live(
+                    f"[{i}/{n_cand}]  {pr_ref:<35}  {n_done}/{n_total}"
+                    f"  → {verdict.verdict} ({verdict.confidence})"
+                )
+            except Exception as exc:
+                log.warning("Failed to judge comment %d: %s", c["id"], exc)
+
+        elapsed = time.monotonic() - start
+        eta = elapsed / i * (n_cand - i) if i < n_cand else 0
+        _live_done(
+            f"[{i}/{n_cand}]  {pr_ref:<35}  {n_done}/{n_total} done"
+            f"  yes={pr_yes} no={pr_no} unclear={pr_unclear}"
+            f"  [{int(elapsed)}s, ~{int(eta)}s left  {budget.analyze_used:,}tok]"
+        )
+
+    elapsed = time.monotonic() - start
+    print(
+        f"  Analyze done: {total_analyzed} comments in {int(elapsed)}s"
+        f"  yes={n_yes} no={n_no} unclear={n_unclear}  ({budget.summary()})"
+    )
 
 
 # ── Phase 3: Score PRs ──────────────────────────────────────────────────────
@@ -432,21 +593,24 @@ def _run_judge_step(
     n_top = max(1, math.ceil(len(scored) * top_pct / 100))
     top = scored[:n_top]
     start = time.monotonic()
-    print(f"Running final judge on top {n_top} PRs (top {top_pct}%)...")
+    print(f"  Judging top {n_top} PRs (top {top_pct}%)...")
 
     for i, pr in enumerate(top, 1):
         if not budget.ok("judge"):
-            print(f"\nJudge budget reached ({budget.judge_used:,} tokens). Stopping.")
+            _live_done(f"Judge budget reached ({budget.judge_used:,} tokens). Stopping.")
             break
+        repo = f"{pr['project_key']}/{pr['slug']}"
+        pr_ref = f"{repo}#{pr['pr_id']}"
+        _live(f"[{i}/{len(top)}]  {pr_ref:<35}  score={pr['total_score']:.2f}  judging...")
         _judge_pr(conn, pr, judge, judge_model, template, scorer_model, budget, max_comment_chars, now_ms)
         elapsed = time.monotonic() - start
         eta = elapsed / i * (len(top) - i) if i < len(top) else 0
-        repo = f"{pr['project_key']}/{pr['slug']}"
-        print(
-            f"  [{i}/{len(top)}]  {repo}#{pr['pr_id']}"
-            f"  score={pr['total_score']:.2f}  → {pr.get('verdict','?')}"
-            f"  [{int(elapsed)}s, ~{int(eta)}s left  {budget.judge_used:,}tok]",
-            flush=True,
+        verdict = pr.get("verdict", "?")
+        reasoning = (pr.get("verdict_reasoning") or "")[:60]
+        _live_done(
+            f"[{i}/{len(top)}]  {pr_ref:<35}  score={pr['total_score']:.2f}  → {verdict}"
+            f"  \"{reasoning}\""
+            f"  [{int(elapsed)}s, ~{int(eta)}s left  {budget.judge_used:,}tok]"
         )
 
 
@@ -686,6 +850,7 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
     budget = BudgetTracker(
         total_limit    = getattr(args, "budget_tokens", None),
         classify_limit = getattr(args, "budget_classify", None),
+        analyze_limit  = getattr(args, "budget_analyze", None),
         judge_limit    = getattr(args, "budget_judge", None),
     )
 
@@ -750,8 +915,9 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
         return
 
     # ── Phase 2: Classify ──────────────────────────────────────────────────
+    needs_llm = any(s in steps for s in ("classify", "analyze", "judge"))
     judge = None
-    if "classify" in steps or "judge" in steps:
+    if needs_llm:
         api_key  = resolve_judge_api_key(cfg)
         base_url = resolve_judge_base_url(cfg)
         if not api_key:
@@ -761,8 +927,22 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
         judge = LLMJudge(model=classifier_model, api_key=api_key, base_url=base_url)
 
     if "classify" in steps:
-        print(f"\nPhase 2: classify comments  (model={classifier_model})")
+        print(f"\nPhase 2a: classify comments  (model={classifier_model})")
         _run_classify_step(conn, candidates, judge, classifier_model, budget, max_chars)
+
+    # ── Phase 2b: Analyze (acceptance verdicts) ───────────────────────────
+    # Use change_judge_model for analysis; defaults to classifier_model
+    analyze_model = change_judge_model or classifier_model
+    if "analyze" in steps:
+        # If analyze_model differs from classifier, create a new judge instance
+        analyze_judge = judge
+        if analyze_model != classifier_model:
+            analyze_judge = LLMJudge(model=analyze_model, api_key=api_key, base_url=base_url)
+        print(f"\nPhase 2b: analyze unanalyzed comments  (model={analyze_model})")
+        _run_analyze_step(conn, candidates, analyze_judge, analyze_model, budget, max_chars)
+        # Set change_judge_model so score step picks up the results
+        if not change_judge_model:
+            change_judge_model = analyze_model
 
     # ── Phase 3: Score ─────────────────────────────────────────────────────
     scored: list[dict] = []

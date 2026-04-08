@@ -14,6 +14,10 @@ from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
+# Suppress noisy HTTP request logs from openai/httpx
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+
 
 @dataclass
 class JudgeVerdict:
