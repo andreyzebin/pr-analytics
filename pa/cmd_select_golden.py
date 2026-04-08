@@ -464,9 +464,12 @@ def _score_pr(conn, pr: dict, classifier_model: str, judge_model: str | None) ->
 
     # Weighted total
     if change_score_ratio is not None:
+        # Have acceptance data → use it with 30% weight
         total = (diversity * 0.25 + depth_score * 0.25 +
                  change_score_ratio * 0.30 + style_noise * 0.10 + size_score * 0.10)
     else:
+        # No acceptance data (all verdicts were "unclear" or no feedback at all)
+        # → score only by comment quality, ignore acceptance signal
         total = (diversity * 0.35 + depth_score * 0.35 +
                  style_noise * 0.15 + size_score * 0.15)
 
