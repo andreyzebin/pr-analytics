@@ -154,6 +154,19 @@ agent_comments → feedback_rate → semantic_acceptance_rate
                                  semantic_acceptance_rate_all  (реальное влияние на весь поток)
 ```
 
+**Формулы:**
+- `cycle_time` = `median((closed_date - created_date) / 3600000)` часы, по PR с `state=<--state>`
+- `acceptance_rate` = `count(MERGED) / count(MERGED + DECLINED) × 100`
+- `throughput` = `count(MERGED)` за период
+- `total_prs` = `count(MERGED + DECLINED)` за период
+- `time_to_first_comment` = `median(first_non_author_comment_date - created_date)` часы
+- `agent_comments` = `sum(root comments by --author)` за период
+- `feedback_rate` = `comments_with_reactions_or_replies / total_comments × 100`
+- `semantic_acceptance_rate` = `yes / (yes + no) × 100` — только комментарии с фидбеком
+- `semantic_acceptance_rate_all` = `yes / total_comments × 100` — все комментарии в знаменателе
+
+Все trend-метрики группируются по `closed_date` в периоды (week: `%G-W%V`, month: `%Y-%m`).
+
 #### Примеры
 
 ```bash
@@ -424,14 +437,72 @@ heuristic → classify → analyze → score → judge
 | `score` | Вычисляет составной скор PR из классификаций + вердиктов | нет |
 | `judge` | Финальный вердикт GOLD / SILVER / REJECT на топ-N% | да |
 
-**Типы замечаний:** `СТИЛЬ`, `ПОВЕРХНОСТНАЯ_ЛОГИКА`, `ГЛУБОКАЯ_ЛОГИКА`, `АРХИТЕКТУРА`, `ПРОИЗВОДИТЕЛЬНОСТЬ`, `БЕЗОПАСНОСТЬ`, `ТЕСТЫ`, `БИЗНЕС_ЛОГИКА`, `УСТОЙЧИВОСТЬ`, `ЧИТАЕМОСТЬ`
+**Типы замечаний (classify):** `СТИЛЬ`, `ПОВЕРХНОСТНАЯ_ЛОГИКА`, `ГЛУБОКАЯ_ЛОГИКА`, `АРХИТЕКТУРА`, `ПРОИЗВОДИТЕЛЬНОСТЬ`, `БЕЗОПАСНОСТЬ`, `ТЕСТЫ`, `БИЗНЕС_ЛОГИКА`, `УСТОЙЧИВОСТЬ`, `ЧИТАЕМОСТЬ`
 
-**Скор PR** (0..1) — взвешенная сумма:
-- Разноплановость (25%): уникальных типов / 3
-- Глубина (25%): средняя глубина комментариев
-- Принятие (30%): доля `yes` из `analyze-feedback`, если запускался
-- Отсутствие стилистического шума (15%)
-- Нормализованный размер PR (15%)
+**Глубокие типы** (учитываются отдельно при ранжировании): `ГЛУБОКАЯ_ЛОГИКА`, `АРХИТЕКТУРА`, `БЕЗОПАСНОСТЬ`, `БИЗНЕС_ЛОГИКА`, `УСТОЙЧИВОСТЬ`
+
+#### Эвристический фильтр (heuristic)
+
+Чистый SQL без LLM-вызовов. Проходят PR, удовлетворяющие всем условиям:
+
+| Параметр | Default | Описание |
+|---|---|---|
+| Время жизни | 4–120 ч | `(closed_date - created_date)` в часах |
+| Ревьюверы | ≥ 2 | `json_array_length(reviewers)` |
+| Корневые комментарии (не от автора PR) | 3–30 | `COUNT(c.id) WHERE parent_id IS NULL AND author != pr.author` |
+| Ответы | > 0 | Хотя бы один reply в треде |
+| Файлов изменено (если есть `pr_diff_stats`) | 2–20 | Из кеша diff stats |
+| Доля тестов/конфигов | < 40% | `test_config_ratio` из `pr_diff_stats` |
+
+#### Классификация комментариев (classify)
+
+Каждый корневой комментарий (не от автора PR) отправляется в LLM с промптом, который возвращает:
+- `type` — один из 10 типов
+- `depth` — 1 (поверхностный), 2 (средний), 3 (глубокий)
+
+#### Анализ принятия (analyze)
+
+Для комментариев с фидбеком (реакция или ответ) LLM-судья определяет, было ли замечание принято:
+- `yes` — замечание признали обоснованным
+- `no` — замечание отклонили
+- `unclear` — невозможно определить
+
+Комментарии без фидбека пропускаются. Результат сохраняется в `comment_analysis`.
+
+#### Скор PR (score)
+
+Составной скор `total_score ∈ [0, 1]` — взвешенная сумма пяти компонентов.
+
+**Если есть данные analyze (change_score_ratio ≠ NULL):**
+
+```
+total_score = diversity × 0.25 + depth × 0.25 + change × 0.30 + noise × 0.10 + size × 0.10
+```
+
+**Если analyze не запускался:**
+
+```
+total_score = diversity × 0.35 + depth × 0.35 + noise × 0.15 + size × 0.15
+```
+
+| Компонент | Формула | Диапазон |
+|---|---|---|
+| `diversity` | `min(unique_types, 3) / 3` | 0..1 |
+| `depth` | `(avg_depth - 1) / 2` где `avg_depth = mean(depth по всем комментариям)` | 0..1 |
+| `change` | `count(verdict='yes') / count(verdict IN ('yes','no'))` | 0..1 |
+| `noise` | `1 - count(type='СТИЛЬ') / total_comments` | 0..1 |
+| `size` | `max(0, 1 - abs(lines_changed - 200) / 200)` (пик в 200 строк; 0.5 если нет данных) | 0..1 |
+
+- `unique_types` — количество уникальных типов замечаний в PR
+- `avg_depth` — среднее значение depth (1–3) по всем классифицированным комментариям
+- `lines_changed` = `lines_added + lines_deleted` из `pr_diff_stats`
+
+#### Финальный вердикт (judge)
+
+Топ N% PR по `total_score` (default: 20%) отправляются на финальную оценку LLM:
+- `GOLD` — идеальный эталон для бенчмарка
+- `SILVER` — хороший PR, но не идеальный
+- `REJECT` — не подходит как эталон
 
 ```bash
 # Быстрый просмотр кандидатов — только эвристика (без LLM, мгновенно)
