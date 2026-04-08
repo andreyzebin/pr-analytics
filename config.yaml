@@ -29,3 +29,11 @@ judge:
 
   # Optional: OpenAI-compatible base URL (leave empty for Anthropic)
   # base_url: "https://api.openai.com/v1"
+
+golden:
+  # Heuristic filter defaults for select-golden command
+  min_lifetime_h: 0.25    # 15 minutes
+  max_lifetime_h: 120     # 5 days
+  min_reviewers: 1
+  min_comments: 2
+  max_comments: 30

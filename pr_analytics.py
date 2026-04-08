@@ -133,12 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Token budget for final judge step")
     p.add_argument("--max-comment-chars", type=int, default=1500, dest="max_comment_chars",
                    help="Truncate comment text to this length before sending to LLM (default: 1500)")
-    # Heuristic thresholds
-    p.add_argument("--min-lifetime-h", type=float, default=4, dest="min_lifetime_h")
-    p.add_argument("--max-lifetime-h", type=float, default=120, dest="max_lifetime_h")
-    p.add_argument("--min-reviewers", type=int, default=2, dest="min_reviewers")
-    p.add_argument("--min-comments", type=int, default=3, dest="min_comments")
-    p.add_argument("--max-comments", type=int, default=30, dest="max_comments")
+    # Heuristic thresholds (defaults from config.yaml → golden section)
+    p.add_argument("--min-lifetime-h", type=float, default=None, dest="min_lifetime_h")
+    p.add_argument("--max-lifetime-h", type=float, default=None, dest="max_lifetime_h")
+    p.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers")
+    p.add_argument("--min-comments", type=int, default=None, dest="min_comments")
+    p.add_argument("--max-comments", type=int, default=None, dest="max_comments")
     p.add_argument("--output", default="output/golden.html", help="HTML report output path")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 

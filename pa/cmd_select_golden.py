@@ -895,13 +895,14 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
 
     # ── Phase 1: Heuristic ─────────────────────────────────────────────────
     print(f"\nPhase 1: heuristic filter  ({total_in_range} PRs in range)")
+    gcfg = cfg.get("golden", {})
     candidates = _heuristic_filter(
         conn, repo_ids, since_ts, until_ts,
-        min_lifetime_h = getattr(args, "min_lifetime_h", 4),
-        max_lifetime_h = getattr(args, "max_lifetime_h", 120),
-        min_reviewers  = getattr(args, "min_reviewers", 2),
-        min_comments   = getattr(args, "min_comments", 3),
-        max_comments   = getattr(args, "max_comments", 30),
+        min_lifetime_h = getattr(args, "min_lifetime_h", None) or gcfg.get("min_lifetime_h", 0.25),
+        max_lifetime_h = getattr(args, "max_lifetime_h", None) or gcfg.get("max_lifetime_h", 120),
+        min_reviewers  = getattr(args, "min_reviewers", None) or gcfg.get("min_reviewers", 1),
+        min_comments   = getattr(args, "min_comments", None) or gcfg.get("min_comments", 2),
+        max_comments   = getattr(args, "max_comments", None) or gcfg.get("max_comments", 30),
     )
     print(f"  → {len(candidates)} candidates passed heuristic")
 
