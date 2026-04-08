@@ -99,9 +99,19 @@ def _heuristic_filter(
     min_reviewers: int,
     min_comments: int,
     max_comments: int,
+    exclude_authors: list[str] | None = None,
 ) -> list[dict]:
     ph = ",".join("?" * len(repo_ids))
     params: list[Any] = list(repo_ids)
+
+    # Build exclude condition for comments JOIN
+    excl_cond = ""
+    if exclude_authors:
+        excl_ph = ",".join("?" * len(exclude_authors))
+        excl_cond = f" AND c.author NOT IN ({excl_ph})"
+        # params for exclude_authors are added after repo_ids,
+        # but we need them inside the FILTER expressions — use a CTE instead
+
     q = f"""
         SELECT
             pr.repo_id, pr.pr_id, pr.title, pr.author,
@@ -109,10 +119,10 @@ def _heuristic_filter(
             r.project_key, r.slug,
             (pr.closed_date - pr.created_date) / 3600000.0      AS lifetime_h,
             json_array_length(pr.reviewers)                      AS reviewer_count,
-            COUNT(c.id) FILTER (WHERE c.parent_id IS NULL AND c.author != pr.author)
+            COUNT(c.id) FILTER (WHERE c.parent_id IS NULL AND c.author != pr.author{excl_cond})
                 AS root_comment_count,
-            COUNT(c.id) FILTER (WHERE c.parent_id IS NOT NULL)   AS reply_count,
-            COUNT(DISTINCT c.author) FILTER (WHERE c.author != pr.author)
+            COUNT(c.id) FILTER (WHERE c.parent_id IS NOT NULL{excl_cond})   AS reply_count,
+            COUNT(DISTINCT c.author) FILTER (WHERE c.author != pr.author{excl_cond})
                 AS unique_commenters
         FROM pull_requests pr
         JOIN repos r ON r.id = pr.repo_id
@@ -121,6 +131,10 @@ def _heuristic_filter(
           AND pr.state IN ('MERGED','DECLINED')
           AND pr.closed_date IS NOT NULL
     """
+    # Add exclude_authors params for each FILTER expression (3 times)
+    if exclude_authors:
+        params.extend(exclude_authors * 3)
+
     if since_ts:
         q += " AND pr.created_date >= ?"
         params.append(since_ts)
@@ -182,6 +196,7 @@ def _run_classify_step(
     classifier_model: str,
     budget: BudgetTracker,
     max_comment_chars: int,
+    exclude_authors: list[str] | None = None,
 ) -> None:
     template = _CLASSIFY_PROMPT.read_text(encoding="utf-8")
     now_ms = int(time.time() * 1000)
@@ -196,17 +211,24 @@ def _run_classify_step(
         repo = f"{pr['project_key']}/{pr['slug']}"
         pr_ref = f"{repo}#{pr['pr_id']}"
 
-        unclassified = conn.execute("""
+        excl_q = ""
+        excl_params: list[Any] = []
+        if exclude_authors:
+            excl_ph = ",".join("?" * len(exclude_authors))
+            excl_q = f" AND c.author NOT IN ({excl_ph})"
+            excl_params = list(exclude_authors)
+        unclassified = conn.execute(f"""
             SELECT c.id, c.text, c.file_path, c.line
             FROM pr_comments c
             WHERE c.repo_id = ? AND c.pr_id = ?
               AND c.parent_id IS NULL
               AND c.author != ?
+              {excl_q}
               AND NOT EXISTS (
                   SELECT 1 FROM comment_classification cc
                   WHERE cc.comment_id = c.id AND cc.classifier_model = ?
               )
-        """, (pr["repo_id"], pr["pr_id"], pr["author"], classifier_model)).fetchall()
+        """, (pr["repo_id"], pr["pr_id"], pr["author"], *excl_params, classifier_model)).fetchall()
 
         n_total = len(unclassified)
         if n_total == 0:
@@ -285,6 +307,7 @@ def _run_analyze_step(
     analyze_model: str,
     budget: BudgetTracker,
     max_comment_chars: int,
+    exclude_authors: list[str] | None = None,
 ) -> None:
     from pa.cmd_analyze import _build_prompt
 
@@ -302,11 +325,18 @@ def _run_analyze_step(
         repo = f"{pr['project_key']}/{pr['slug']}"
         pr_ref = f"{repo}#{pr['pr_id']}"
 
-        unanalyzed = conn.execute("""
+        excl_q = ""
+        excl_params: list[Any] = []
+        if exclude_authors:
+            excl_ph = ",".join("?" * len(exclude_authors))
+            excl_q = f" AND c.author NOT IN ({excl_ph})"
+            excl_params = list(exclude_authors)
+        unanalyzed = conn.execute(f"""
             SELECT c.id, c.text, c.severity, c.file_path, c.line, c.author
             FROM pr_comments c
             WHERE c.repo_id = ? AND c.pr_id = ?
               AND c.parent_id IS NULL
+              {excl_q}
               AND NOT EXISTS (
                   SELECT 1 FROM comment_analysis ca
                   WHERE ca.comment_id = c.id AND ca.judge_model = ?
@@ -316,7 +346,7 @@ def _run_analyze_step(
                   OR EXISTS (SELECT 1 FROM pr_comments reply
                              WHERE reply.parent_id = c.id AND reply.author != c.author)
               )
-        """, (pr["repo_id"], pr["pr_id"], analyze_model)).fetchall()
+        """, (pr["repo_id"], pr["pr_id"], *excl_params, analyze_model)).fetchall()
 
         n_total = len(unanalyzed)
         if n_total == 0:
@@ -411,15 +441,23 @@ def _run_analyze_step(
 
 # ── Phase 3: Score PRs ──────────────────────────────────────────────────────
 
-def _score_pr(conn, pr: dict, classifier_model: str, judge_model: str | None) -> dict | None:
-    classes = conn.execute("""
+def _score_pr(conn, pr: dict, classifier_model: str, judge_model: str | None,
+              exclude_authors: list[str] | None = None) -> dict | None:
+    excl_q = ""
+    excl_params: list[Any] = []
+    if exclude_authors:
+        excl_ph = ",".join("?" * len(exclude_authors))
+        excl_q = f" AND c.author NOT IN ({excl_ph})"
+        excl_params = list(exclude_authors)
+    classes = conn.execute(f"""
         SELECT cc.comment_type, cc.depth
         FROM comment_classification cc
         JOIN pr_comments c ON c.id = cc.comment_id
         WHERE c.repo_id = ? AND c.pr_id = ?
           AND c.parent_id IS NULL AND c.author != ?
+          {excl_q}
           AND cc.classifier_model = ?
-    """, (pr["repo_id"], pr["pr_id"], pr["author"], classifier_model)).fetchall()
+    """, (pr["repo_id"], pr["pr_id"], pr["author"], *excl_params, classifier_model)).fetchall()
 
     if not classes:
         return None
@@ -497,10 +535,11 @@ def _run_score_step(
     judge_model: str | None,
     scorer_model: str,
     now_ms: int,
+    exclude_authors: list[str] | None = None,
 ) -> list[dict]:
     scored = []
     for pr in candidates:
-        s = _score_pr(conn, pr, classifier_model, judge_model)
+        s = _score_pr(conn, pr, classifier_model, judge_model, exclude_authors)
         if s is None:
             continue
         conn.execute("""
@@ -850,6 +889,14 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
     # judge_model for change_score lookup (from analyze-feedback, optional)
     change_judge_model = getattr(args, "change_judge_model", None)
 
+    # Exclude comments by these authors from all phases
+    gcfg = cfg.get("golden", {})
+    excl_arg = getattr(args, "exclude_authors", None)
+    if excl_arg:
+        exclude_authors = [a.strip() for a in excl_arg.split(",")]
+    else:
+        exclude_authors = gcfg.get("exclude_authors", None) or None
+
     budget = BudgetTracker(
         total_limit    = getattr(args, "budget_tokens", None),
         classify_limit = getattr(args, "budget_classify", None),
@@ -894,8 +941,9 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
     total_in_range = conn.execute(count_q, count_params).fetchone()[0]
 
     # ── Phase 1: Heuristic ─────────────────────────────────────────────────
+    if exclude_authors:
+        print(f"Excluding comments by: {', '.join(exclude_authors)}")
     print(f"\nPhase 1: heuristic filter  ({total_in_range} PRs in range)")
-    gcfg = cfg.get("golden", {})
     candidates = _heuristic_filter(
         conn, repo_ids, since_ts, until_ts,
         min_lifetime_h = getattr(args, "min_lifetime_h", None) or gcfg.get("min_lifetime_h", 0.25),
@@ -903,6 +951,7 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
         min_reviewers  = getattr(args, "min_reviewers", None) or gcfg.get("min_reviewers", 1),
         min_comments   = getattr(args, "min_comments", None) or gcfg.get("min_comments", 2),
         max_comments   = getattr(args, "max_comments", None) or gcfg.get("max_comments", 30),
+        exclude_authors = exclude_authors,
     )
     print(f"  → {len(candidates)} candidates passed heuristic")
 
@@ -932,7 +981,7 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
 
     if "classify" in steps:
         print(f"\nPhase 2a: classify comments  (model={classifier_model})")
-        _run_classify_step(conn, candidates, judge, classifier_model, budget, max_chars)
+        _run_classify_step(conn, candidates, judge, classifier_model, budget, max_chars, exclude_authors)
 
     # ── Phase 2b: Analyze (acceptance verdicts) ───────────────────────────
     # Use change_judge_model for analysis; defaults to classifier_model
@@ -943,7 +992,7 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
         if analyze_model != classifier_model:
             analyze_judge = LLMJudge(model=analyze_model, api_key=api_key, base_url=base_url)
         print(f"\nPhase 2b: analyze unanalyzed comments  (model={analyze_model})")
-        _run_analyze_step(conn, candidates, analyze_judge, analyze_model, budget, max_chars)
+        _run_analyze_step(conn, candidates, analyze_judge, analyze_model, budget, max_chars, exclude_authors)
         # Set change_judge_model so score step picks up the results
         if not change_judge_model:
             change_judge_model = analyze_model
@@ -953,7 +1002,7 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
     if "score" in steps or "judge" in steps:
         print("\nPhase 3: compute PR scores")
         now_ms = int(time.time() * 1000)
-        scored = _run_score_step(conn, candidates, classifier_model, change_judge_model, scorer_model, now_ms)
+        scored = _run_score_step(conn, candidates, classifier_model, change_judge_model, scorer_model, now_ms, exclude_authors)
         if not scored:
             print("  No PRs scored — run 'classify' step first.")
         else:

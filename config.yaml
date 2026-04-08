@@ -37,3 +37,7 @@ golden:
   min_reviewers: 1
   min_comments: 2
   max_comments: 30
+  # Exclude comments by these authors from all phases (heuristic, classify, analyze, score)
+  # exclude_authors:
+  #   - bot-account
+  #   - ci-system

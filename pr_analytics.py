@@ -131,6 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Token budget for analyze step (comment acceptance)")
     p.add_argument("--budget-judge", type=int, default=None, dest="budget_judge",
                    help="Token budget for final judge step")
+    p.add_argument("--exclude-authors", default=None, dest="exclude_authors",
+                   help="Comma-separated slugs to exclude from all phases (also configurable in golden.exclude_authors)")
     p.add_argument("--max-comment-chars", type=int, default=1500, dest="max_comment_chars",
                    help="Truncate comment text to this length before sending to LLM (default: 1500)")
     # Heuristic thresholds (defaults from config.yaml → golden section)

@@ -463,7 +463,13 @@ golden:
   min_reviewers: 1
   min_comments: 2
   max_comments: 30
+  # Исключить комментарии от этих аккаунтов из всех фаз
+  exclude_authors:
+    - bot-account
+    - ci-system
 ```
+
+`exclude_authors` убирает комментарии указанных аккаунтов из всех фаз: эвристика (не считаются в `root_comment_count`), classify, analyze и score. Задаётся в YAML или через CLI `--exclude-authors slug1,slug2`.
 
 #### Классификация комментариев (classify)
 
@@ -542,10 +548,11 @@ total_score = diversity × 0.35 + depth × 0.35 + noise × 0.15 + size × 0.15
 | `--budget-classify` | Лимит токенов на шаг classify |
 | `--budget-analyze` | Лимит токенов на шаг analyze |
 | `--budget-judge` | Лимит токенов на шаг judge |
+| `--exclude-authors` | Comma-separated slugs — исключить из всех фаз (также `golden.exclude_authors` в YAML) |
 | `--max-comment-chars` | Обрезка текста комментария (default: 1500) |
-| `--min-lifetime-h` / `--max-lifetime-h` | Время жизни PR в часах (default: 4–120) |
-| `--min-reviewers` | Минимум ревьюверов (default: 2) |
-| `--min-comments` / `--max-comments` | Диапазон числа комментариев (default: 3–30) |
+| `--min-lifetime-h` / `--max-lifetime-h` | Время жизни PR в часах (default: 0.25–120) |
+| `--min-reviewers` | Минимум ревьюверов (default: 1) |
+| `--min-comments` / `--max-comments` | Диапазон числа комментариев (default: 2–30) |
 | `--output` | HTML-отчёт (default: `output/golden.html`) |
 
 **HTML-отчёт** содержит: воронку фильтрации, scatter-диаграмму (разнообразие vs глубина), распределение типов комментариев и таблицу PR с вердиктами.
