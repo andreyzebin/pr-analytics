@@ -445,14 +445,25 @@ heuristic → classify → analyze → score → judge
 
 Чистый SQL без LLM-вызовов. Проходят PR, удовлетворяющие всем условиям:
 
-| Параметр | Default | Описание |
-|---|---|---|
-| Время жизни | 4–120 ч | `(closed_date - created_date)` в часах |
-| Ревьюверы | ≥ 2 | `json_array_length(reviewers)` |
-| Корневые комментарии (не от автора PR) | 3–30 | `COUNT(c.id) WHERE parent_id IS NULL AND author != pr.author` |
-| Ответы | > 0 | Хотя бы один reply в треде |
-| Файлов изменено (если есть `pr_diff_stats`) | 2–20 | Из кеша diff stats |
-| Доля тестов/конфигов | < 40% | `test_config_ratio` из `pr_diff_stats` |
+| Параметр | Default | CLI | YAML (`golden:`) | Описание |
+|---|---|---|---|---|
+| Время жизни | 0.25–120 ч | `--min-lifetime-h` / `--max-lifetime-h` | `min_lifetime_h` / `max_lifetime_h` | `(closed_date - created_date)` в часах |
+| Ревьюверы | ≥ 1 | `--min-reviewers` | `min_reviewers` | `json_array_length(reviewers)` |
+| Корневые комментарии (не от автора PR) | 2–30 | `--min-comments` / `--max-comments` | `min_comments` / `max_comments` | `COUNT WHERE parent_id IS NULL AND author != pr.author` |
+| Ответы | > 0 | — | — | Хотя бы один reply в треде |
+| Файлов изменено (если есть `pr_diff_stats`) | 2–20 | — | — | Из кеша diff stats |
+| Доля тестов/конфигов | < 40% | — | — | `test_config_ratio` из `pr_diff_stats` |
+
+Пороги настраиваются в `config.yaml` (секция `golden:`), переопределяются CLI-аргументами:
+
+```yaml
+golden:
+  min_lifetime_h: 0.25    # 15 минут
+  max_lifetime_h: 120     # 5 дней
+  min_reviewers: 1
+  min_comments: 2
+  max_comments: 30
+```
 
 #### Классификация комментариев (classify)
 
