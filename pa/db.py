@@ -185,6 +185,8 @@ def delete_pr_comments(conn: sqlite3.Connection, repo_id: int, pr_id: int) -> No
     if comment_ids:
         placeholders = ",".join("?" * len(comment_ids))
         conn.execute(f"DELETE FROM comment_reactions WHERE comment_id IN ({placeholders})", comment_ids)
+        conn.execute(f"DELETE FROM comment_analysis WHERE comment_id IN ({placeholders})", comment_ids)
+        conn.execute(f"DELETE FROM comment_classification WHERE comment_id IN ({placeholders})", comment_ids)
     conn.execute("DELETE FROM pr_comments WHERE repo_id=? AND pr_id=?", (repo_id, pr_id))
 
 
