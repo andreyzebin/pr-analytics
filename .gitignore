@@ -2,6 +2,9 @@
 .env
 config.local.yaml
 output/
+*.csv
+*.html
+repos.txt
 __pycache__/
 *.pyc
 *.pyo
