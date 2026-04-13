@@ -19,6 +19,7 @@ import argparse
 import logging
 import sys
 
+from pa.cmd_acceptance import cmd_acceptance
 from pa.cmd_analyze import cmd_analyze_feedback
 from pa.cmd_select_golden import cmd_select_golden
 from pa.cmd_cache import cmd_cache
@@ -183,6 +184,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", default="table", choices=["table", "csv", "json"])
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
+    # ── acceptance ──────────────────────────────────────────────────────────
+    p = sub.add_parser("acceptance",
+                       help="Acceptance metrics by diffgraph prompt hash")
+    p.add_argument("--dg-hash", required=True, dest="dg_hash",
+                   help="Diffgraph prompt hash (from dg: tag in comments)")
+    p.add_argument("--since", help="Start date (YYYY-MM-DD)")
+    p.add_argument("--format", default="text", choices=["text", "json"])
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
     return parser
 
 
@@ -207,6 +217,7 @@ def main() -> None:
         "sql": cmd_sql,
         "status": cmd_status,
         "review-feedback": cmd_review_feedback,
+        "acceptance": cmd_acceptance,
     }
 
     fn = commands.get(args.command)

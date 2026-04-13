@@ -1,0 +1,775 @@
+repo,pr_id,pr_title,comment_id,created_date,file_path,line_from,line_to,severity,comment_text,reactions_positive,reactions_negative,reactions_other,reactions_detail,replies_count,replies
+MCPN/cpnadminservice,430,Bug/MCPN-1262: add status changing for sbol order number,1144059,2026-03-31,src/test/java/ru/spasibosberbank/cpnadminservice/service/admin/impl/PromocodeAdminServiceTest.java,187,187,NORMAL,"**Suggestion:** Verify that the boolean parameter passed to `prolongationCount` accurately reflects the intended business logic. If changing from `false` to `true` impacts system behavior significantly, ensure comprehensive testing covers these changes.
+Document why this change was made in the test case comments for future maintainability. [possible issue, importance: 7]
+
+
+```diff
+-verify(mockMarkingService).prolongationCount(List.of(String.valueOf(offerId)), true, null, null);
+ 
++
+```",1,0,0,"{""thumbsup"": 1}",0,[]
+MCPN/cpnadminservice,430,Bug/MCPN-1262: add status changing for sbol order number,1144058,2026-03-31,src/main/java/ru/spasibosberbank/cpnadminservice/service/promocode/impl/PromocodeProcessingServiceImpl.java,145,145,NORMAL,"**Suggestion:** Ensure that logging occurs before any early returns to capture all relevant information about the request processing flow. This helps in debugging and monitoring the application's behavior under various conditions.
+Consider moving this log statement outside the conditional block if it provides value regardless of subsequent validation outcomes. [general, importance: 3]
+
+
+```diff
+-log.info(LogType.OTHER, ""Report type: {}"", reportType.getCode());
+ 
+-      if ((filterBuilder.getMarkingCode() == null || filterBuilder.getMarkingCode().isEmpty()) &&
+-          (filterBuilder.getBatchIds() == null || filterBuilder.getBatchIds().isEmpty()) &&
+-          (filterBuilder.getProductIds() == null || filterBuilder.getProductIds().isEmpty()) &&
+```",0,1,0,"{""-1"": 1}",0,[]
+MCPN/cpnadminservice,430,Bug/MCPN-1262: add status changing for sbol order number,1144057,2026-03-31,src/main/java/ru/spasibosberbank/cpnadminservice/service/utils/PromocodeExportHelper.java,38,38,NORMAL,"**Suggestion:** The condition checking for issued filters may lead to incorrect status assignment. Specifically, if `orderNumber` is present but other fields like `sbolOrderNumber` are also present, the logic might incorrectly classify the request. Consider refining the conditional logic to ensure mutually exclusive or properly prioritized checks for different order number types.
+Additionally, consider adding unit tests to cover scenarios where multiple filter types are present to validate correct behavior. [general, importance: 5]
+
+
+```diff
+-//If filter contains issued filters - change filter to 'ISSUED'
+-      if ((promocodeExportFilter.orderNumber() != null && !promocodeExportFilter.orderNumber().isBlank()) ||
+-          (promocodeExportFilter.customerId() != null && !promocodeExportFilter.customerId().isBlank()) ||
+-          (promocodeExportFilter.sbolOrderNumber() != null && !promocodeExportFilter.sbolOrderNumber().isBlank()) ||
+-          promocodeExportFilter.saleDatetimeFrom() != null || promocodeExportFilter.saleDatetimeTo() != null
+-      ) {
+-          status = ReportStockType.ISSUED.getCode();
+-          log.info(LogType.STATE, ""Report status changed to: {}"", status);
+-      }
+ 
++
+```",0,1,0,"{""-1"": 1}",0,[]
+MCPN/cpnadminservice,430,Bug/MCPN-1262: add status changing for sbol order number,1144056,2026-03-31,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 2 🔵🔵⚪⚪⚪
+
+### 🧪 PR contains tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Logic Change**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminservice/pull-requests/430/diff#src%2Fmain%2Fjava%2Fru%2Fspasibosberbank%2Fcpnadminservice%2Fservice%2Futils%2FPromocodeExportHelper.java?t=38)
+
+The logic for determining the promocode status has been updated to include `sbolOrderNumber` and `customerId` in the condition for setting the status to 'ISSUED'. Ensure this change aligns with business requirements and does not inadvertently affect other functionalities.
+
+
+
+[**Logging Consistency**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminservice/pull-requests/430/diff#src%2Fmain%2Fjava%2Fru%2Fspasibosberbank%2Fcpnadminservice%2Fservice%2Fpromocode%2Fimpl%2FPromocodeProcessingServiceImpl.java?t=146)
+
+A log statement was moved and changed from `LogType.INTEGRATION` to `LogType.OTHER`. Verify that this change in logging level and type is intentional and consistent with the overall logging strategy.
+
+
+
+[**Dependency Updates**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminservice/pull-requests/430/diff#pom.xml?t=13)
+
+Several dependencies including Spring Boot and PostgreSQL driver versions have been updated. Confirm that these updates do not introduce compatibility issues or regressions.
+
+
+
+",0,0,0,{},0,[]
+BILT/fde-dispatcher,58,BILT-588 - some minor fixes for stable operation,1143848,2026-03-31,src/main/resources/application.yaml,87,87,NORMAL,"**Suggestion:** Verify that ignoring `ExecutorBusinessException` in the circuit breaker configuration aligns with the intended fault tolerance strategy. Ensure this exception represents genuine business logic errors that should not count as failures for circuit breaking purposes.
+Consider adding comments to clarify why this exception is ignored, especially if it's not obvious from the class name alone. [general, importance: 7]
+
+
+```diff
+ resilience4j:
+   circuitbreaker:
+     instances:
+       executor:
+         registerHealthIndicator: true
+         slidingWindowSize: 10
+         minimumNumberOfCalls: 5
+         failureRateThreshold: 50
+         waitDurationInOpenState: ${CIRCUIT_BREAKER_WAIT_DURATION:60s}
++        # Ignoring business exceptions to prevent circuit breaker from opening on expected failures
+         ignoreExceptions:
+           - ru.spasibo.bilt.fdedispatcher.domain.port.ExecutorPort$ExecutorBusinessException
+```",0,0,0,{},1,"[{""author"": ""avryzhkov"", ""text"": ""Сам класс явно именован ExecutorBusinessException - достаточно очевидно что circuit breaker должен покрывать инфраструктурные ошибки, а не бизнесовые. Например 5 раз подряд 404 не должно открывать CB. \nСам агент говорит что Consider adding comments to clarify why this exception is ignored **, especially if it's not obvious from the class name alone. **  - но именование класса исключения довольно явное"", ""created_date"": 1774958282102}]"
+BILT/fde-dispatcher,58,BILT-588 - some minor fixes for stable operation,1143847,2026-03-31,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 2 🔵🔵⚪⚪⚪
+
+### 🧪 PR contains tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Configuration Change**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/58/diff#src%2Fmain%2Fresources%2Fapplication.yaml?t=93)
+
+The addition of `ignoreExceptions` for `ExecutorBusinessException` in the circuit breaker configuration should be verified to ensure it aligns with the intended error handling strategy and does not inadvertently suppress important failures.
+
+
+
+[**URI Change**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/58/diff#src%2Fmain%2Fjava%2Fru%2Fspasibo%2Fbilt%2Ffdedispatcher%2Fadapter%2Fout%2Fexecutor%2FExecutorAdapter.java?t=116)
+
+The URI for the stop endpoint has been changed from `/api/v1/sessions/{sessionId}/stop` to `/api/v1/executions/{sessionId}/stop`. This change should be confirmed to be compatible with the executor service's API.
+
+
+
+",0,0,0,{},0,[]
+MCPN/cpnadminui,71,Bug/MCPN-1253: add search by partner crm id in coupon,1143757,2026-03-31,src/domain/entities/coupon.ts,496,496,NORMAL,"**Suggestion:** The `displayField` function for the `partner` relation currently only displays the `crm_id`. Consider including additional identifying information to improve clarity in the UI, such as the partner's name or ID. [general, importance: 5]
+
+
+```diff
+ relation: {
+       entity: 'partner',
+-      displayField: (value) => value.crm_id,
++      displayField: (value) => `${value.name || 'Partner'} [${value.crm_id}]`,
+       multiple: false
+   },
+```",0,1,0,"{""-1"": 1}",1,"[{""author"": ""agtolstov"", ""text"": ""В данном случае неприменимо. фильтр по crm_id"", ""created_date"": 1774948877534}]"
+MCPN/cpnadminui,71,Bug/MCPN-1253: add search by partner crm id in coupon,1143756,2026-03-31,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 3 🔵🔵🔵⚪⚪
+
+### 🧪 No relevant tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Pagination Parameters**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminui/pull-requests/71/diff#src%2Fcomposables%2FuseEntityForm.ts?t=783)
+
+The code explicitly avoids sending pagination parameters for the 'partner' entity. Ensure this behavior is intentional and doesn't lead to performance issues or unexpected data loading behavior.
+
+
+
+[**Validation Logic**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminui/pull-requests/71/diff#src%2Fdomain%2Fentities%2Fcoupon.ts?t=62)
+
+Custom validation logic has been updated to use `recordValue` instead of `values`. Verify that this change doesn't introduce any regressions in form validation.
+
+
+
+[**Display Field Logic**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminui/pull-requests/71/diff#src%2Fdomain%2Fentities%2Fcoupon.ts?t=97)
+
+The `displayField` function now uses `value` instead of `values`. Confirm that this change aligns with the expected data structure and doesn't break the display of related entities.
+
+
+
+",1,0,0,"{""thumbsup"": 1}",1,"[{""author"": ""agtolstov"", ""text"": ""Проверили, всё ок"", ""created_date"": 1774948930137}]"
+MCPN/cpnadminservice,428,MCPN-1261: Fix pagination,1143307,2026-03-30,src/main/java/ru/spasibosberbank/cpnadminservice/service/admin/impl/PromocodeAdminService.java,111,111,NORMAL,"**Suggestion:** The offset calculation for pagination appears incorrect. It should multiply the page number by the limit (items per page) to determine the correct starting point. Verify that `promocodeListAdminDTO.page()` represents a zero-based page index. [possible issue, importance: 8]
+
+
+```diff
+-queryBuilder.setOffset(promocodeListAdminDTO.page());
++queryBuilder.setOffset((promocodeListAdminDTO.page() - 1) * promocodeListAdminDTO.perPage());
+```",0,1,0,"{""-1"": 1}",1,"[{""author"": ""agtolstov"", ""text"": ""Игнорим, в данном случае это номер страницы"", ""created_date"": 1774862399630}]"
+MCPN/cpnadminservice,428,MCPN-1261: Fix pagination,1143306,2026-03-30,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 2 🔵🔵⚪⚪⚪
+
+### 🧪 No relevant tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Pagination Logic Error**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminservice/pull-requests/428/diff#src%2Fmain%2Fjava%2Fru%2Fspasibosberbank%2Fcpnadminservice%2Fservice%2Fadmin%2Fimpl%2FPromocodeAdminService.java?t=111)
+
+The pagination offset is being set directly from the page number without multiplying by the page size. This will lead to incorrect pagination behavior where the offset does not correctly correspond to the intended page.
+
+
+
+",0,0,0,{},0,[]
+MCPN/cpnadminservice,429,MCPN-1263: Update data type to prevent rounding of identifiers,1143300,2026-03-30,src/main/java/ru/spasibosberbank/cpnadminservice/mapper/impl/OrderAdminMapper.java,57,57,NORMAL,"**Suggestion:** Using `Optional` explicitly instead of calling `.get()` directly on the stream result improves safety and readability. It avoids potential `NoSuchElementException` if the stream were unexpectedly empty. [possible issue, importance: 8]
+
+
+```diff
+-OrderItemEntity orderItemEntity = itemEntities.stream().findFirst().get();
+-        offerIds.add(String.valueOf(orderItemEntity.getOfferId()));
++Optional<OrderItemEntity> firstItemOpt = itemEntities.stream().findFirst();
++        firstItemOpt.ifPresent(item -> offerIds.add(String.valueOf(item.getOfferId())));
+```",0,1,0,"{""thumbsdown"": 1}",1,"[{""author"": ""agtolstov"", ""text"": ""есть проверка в коде выше"", ""created_date"": 1774861939829}]"
+MCPN/cpnadminservice,429,MCPN-1263: Update data type to prevent rounding of identifiers,1143299,2026-03-30,src/main/java/ru/spasibosberbank/cpnadminservice/mapper/impl/OrderAdminMapper.java,53,53,NORMAL,"**Suggestion:** Consider initializing the `offerIds` list with an initial capacity to improve performance if the typical size is known. This can reduce internal array resizing operations. [general, importance: 7]
+
+
+```diff
+-List<String> offerIds = new ArrayList<>();
++List<String> offerIds = new ArrayList<>(itemEntities.size());
+```",1,0,0,"{""thumbsup"": 1}",1,"[{""author"": ""agtolstov"", ""text"": ""игнорируем, так как придет только 1 элемент"", ""created_date"": 1774862114710}]"
+MCPN/cpnadminservice,429,MCPN-1263: Update data type to prevent rounding of identifiers,1143298,2026-03-30,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 2 🔵🔵⚪⚪⚪
+
+### 🧪 No relevant tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Data Type Change Impact**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminservice/pull-requests/429/diff#src%2Fmain%2Fjava%2Fru%2Fspasibosberbank%2Fcpnadminservice%2Fmapper%2Fimpl%2FOrderAdminMapper.java?t=53)
+
+The change from `List<Long>` to `List<String>` for `offerIds` may impact how these IDs are used downstream. Verify that all consumers of this DTO can handle string representations of IDs.
+
+
+
+[**DTO Field Type Modification**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/cpnadminservice/pull-requests/429/diff#src%2Fmain%2Fjava%2Fru%2Fspasibosberbank%2Fcpnadminservice%2Fmodel%2Fdto%2Fadmin%2Fresponse%2FOrderAdminDTO.java?t=37)
+
+Changing the `offerIds` field type in the DTO from `Long` to `String` could affect serialization/deserialization and compatibility with existing APIs or services expecting numeric IDs.
+
+
+
+",1,0,0,"{""thumbsup"": 1}",1,"[{""author"": ""agtolstov"", ""text"": ""проверили - не влияет"", ""created_date"": 1774862165126}]"
+MCPN/promocodestorage,53,Bug/MCPN-1092: add cold ttl,1142861,2026-03-27,src/main/java/ru/spasibo/cpn/promocodestorage/task/FillCacheFreeMarkingRunnable.java,89,89,NORMAL,"**Suggestion:** The `coldTtl` parameter is passed directly to `coldBox.pop()`, but there's no validation to ensure `coldTtl` is non-negative. A negative TTL could cause unexpected behavior in downstream systems or database queries. Validate `coldTtl` before using it.
+Add a check to ensure `coldTtl >= 0` and handle invalid values appropriately. [general, importance: 7]
+
+
+```diff
+-tmpReserve = coldBox.pop(product, delta, coldTtl, newKey, false);
++if (coldTtl < 0) {
++            log.warn(""Invalid coldTtl value: {}, defaulting to 0"", coldTtl);
++            coldTtl = 0;
++        }
++        tmpReserve = coldBox.pop(product, delta, coldTtl, newKey, false);
+```",0,1,0,"{""-1"": 1}",0,[]
+MCPN/promocodestorage,53,Bug/MCPN-1092: add cold ttl,1142860,2026-03-27,src/main/java/ru/spasibo/cpn/promocodestorage/service/reserve/driver/PostgreSQLDriver.java,53,53,NORMAL,"**Suggestion:** The code catches a generic `Exception` and logs it, but then proceeds as if the operation succeeded. If `taskManager.reserve()` fails, `markings` may still be empty, leading to incorrect behavior. Ensure that the method returns early or handles the failure case explicitly when `strictQuantity` is true.
+Consider throwing an exception or returning `null` immediately after catching the error to prevent proceeding with an invalid state. [possible issue, importance: 9]
+
+
+```diff
+ if (markings.isEmpty() && strictQuantity) {
+             String curKey = productKeysStore.getCurrent(key);
+ 
+             try {
+                 taskManager.reserve(curKey, count, ttl, code, true).get();
+-            } catch (Exception ignored) {
+-                log.error(ignored.getMessage(), ignored);
++            } catch (Exception e) {
++                log.error(""Failed to reserve with strict quantity"", e);
+                 return null;
+             }
+ 
+             markings = markingReserveRepository.getIdByReservedKey(code);
++            if (markings.isEmpty()) {
++                return null; // Explicitly handle empty markings after retry
++            }
+         }
+```",1,0,0,"{""thumbsup"": 1}",1,"[{""author"": ""agtolstov"", ""text"": ""Частично принято"", ""created_date"": 1774615789498}]"
+MCPN/promocodestorage,53,Bug/MCPN-1092: add cold ttl,1142859,2026-03-27,src/main/java/ru/spasibo/cpn/promocodestorage/service/impl/MarkingServiceImpl.java,120,120,NORMAL,"**Suggestion:** The `isUpdate` flag controls which repository method is called, but there's no validation that `productId` is a valid UUID when `isUpdate` is false. This could lead to a runtime `IllegalArgumentException` if `productId` is not a valid UUID. Add a check or handle the potential exception to prevent unexpected failures.
+Consider wrapping `UUID.fromString(productId)` in a try-catch block to gracefully handle invalid UUIDs. [possible issue, importance: 8]
+
+
+```diff
+ if (isUpdate) rows = markingRepository.reserveByKeyStore(productId, limit, code, Instant.now().plusSeconds(ttl));
+-        else rows = markingRepository.reserve(UUID.fromString(productId), limit, code, Instant.now().plusSeconds(ttl));
++        else {
++            try {
++                rows = markingRepository.reserve(UUID.fromString(productId), limit, code, Instant.now().plusSeconds(ttl));
++            } catch (IllegalArgumentException e) {
++                log.error(""Invalid UUID format for productId: {}"", productId, e);
++                rows = 0; // or handle as appropriate
++            }
++        }
+```",1,0,0,"{""thumbsup"": 1}",0,[]
+MCPN/promocodestorage,53,Bug/MCPN-1092: add cold ttl,1142855,2026-03-27,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 4 🔵🔵🔵🔵⚪
+
+### 🧪 No relevant tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Logic Error**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/promocodestorage/pull-requests/53/diff#src%2Fmain%2Fjava%2Fru%2Fspasibo%2Fcpn%2Fpromocodestorage%2Fservice%2Freserve%2Fdriver%2FPostgreSQLDriver.java?t=53)
+
+The logic for handling `strictQuantity` may lead to incorrect behavior when the initial reservation returns an empty list. It attempts another reservation using `productKeysStore.getCurrent(key)` without verifying if `curKey` is null, potentially causing a NullPointerException or incorrect data access.
+
+
+
+[**Potential Data Inconsistency**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/promocodestorage/pull-requests/53/diff#src%2Fmain%2Fjava%2Fru%2Fspasibo%2Fcpn%2Fpromocodestorage%2Ftask%2FFillCacheFreeMarkingRunnable.java?t=122)
+
+The TTL used for saving `MarkingReservedTmpModel` is based on `coldTtl`, whereas previously it used the regular `ttl`. Ensure this change aligns with the intended lifecycle management of temporary reservations.
+
+
+
+[**Resource Management**](https://sberworks.ru/bitbucket-ci/projects/MCPN/repos/promocodestorage/pull-requests/53/diff#src%2Fmain%2Fjava%2Fru%2Fspasibo%2Fcpn%2Fpromocodestorage%2Fservice%2Freserve%2Fdriver%2FPostgreSQLDriverTaskManager.java?t=31)
+
+Creating a new `ThreadPoolConfig` with `Integer.MAX_VALUE` for `queueCapacity` can lead to resource exhaustion under high load. Consider using a bounded queue to prevent out-of-memory errors.
+
+
+
+",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1141155,2026-03-24,,,,NORMAL,"### Question: 
+hi
+
+### Answer:
+Hello! How can I assist you today with Qodo Merge or PR-Agent?
+
+#### Relevant Sources:
+
+> - https://qodo-merge-docs.qodo.ai//index#overview
+",0,0,0,{},0,[]
+SBLOOM/mediaplanner,71,SBLOOM-139,1141080,2026-03-24,qodo-trigger/Jenkinsfile-trigger.groovy,124,124,NORMAL,"**Suggestion:** The webhook URL is hardcoded. Consider making this configurable via a parameter or environment variable to improve flexibility across different environments (test, staging, production).
+Also, consider adding error handling for non-successful responses (e.g., 400, 500) to log more detailed information about failures. [general, importance: 8]
+
+
+```diff
+-def response = httpRequest(
+-                         url: 'https://steel-bloom-test.spasibotest.ru/webhook/webhook',
+-                         httpMode: 'POST',
+-                         contentType: 'APPLICATION_JSON',
+-                         requestBody: jsonPayload,
+-                         timeout: 30,
+-                         validResponseCodes: '200,201,202,204,400,500'
+-                 )
++def qodoWebhookUrl = env.QODO_WEBHOOK_URL ?: 'https://steel-bloom-test.spasibotest.ru/webhook/webhook'
++                def response = httpRequest(
++                        url: qodoWebhookUrl,
++                        httpMode: 'POST',
++                        contentType: 'APPLICATION_JSON',
++                        requestBody: jsonPayload,
++                        timeout: 30,
++                        validResponseCodes: '200,201,202,204,400,500'
++                )
+```",0,0,0,{},0,[]
+SBLOOM/mediaplanner,71,SBLOOM-139,1141079,2026-03-24,,,,NORMAL,"### Question: 
+tell me about this pr
+
+### Answer:
+Based on the documentation, when you ask ""tell me about this PR,"" the most relevant tool is the **`describe`** tool. This tool scans the PR code changes and generates a comprehensive description including:
+
+- **Title**: An AI-generated title (optional)
+- **Type**: Classification of the PR (e.g., Bug fix, Enhancement)
+- **Summary**: A concise overview of the changes
+- **Walkthrough**: A detailed breakdown of modifications per file
+- **Labels**: Custom or default labels for the PR
+- **Diagram**: A Mermaid sequence diagram of component interactions (optional)
+
+### How to Use:
+- **Manual Trigger**: Comment `/describe` on the PR.
+- **Automatic Trigger**: Configure via `pr_commands` in your settings to run automatically on PR creation.
+
+### Key Features:
+- Preserves original user descriptions.
+- Supports custom labels via configuration or repo settings.
+- Optionally generates a PR diagram for better visualization.
+
+This tool provides a quick, structured understanding of the PR's purpose and changes.
+
+#### Relevant Sources:
+
+> - https://qodo-merge-docs.qodo.ai/tools/describe#overview
+> - https://qodo-merge-docs.qodo.ai/index#features
+> - https://qodo-merge-docs.qodo.ai/tools/describe#example-usage
+",0,0,0,{},0,[]
+SBLOOM/mediaplanner,71,SBLOOM-139,1141077,2026-03-24,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 4 🔵🔵🔵🔵⚪
+
+### 🧪 PR contains tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Event Modification Logic**](https://sberworks.ru/bitbucket-ci/projects/SBLOOM/repos/mediaplanner/pull-requests/71/diff#qodo-trigger%2FJenkinsfile-trigger.groovy?t=69)
+
+The logic for modifying the event when Qodo is added as a reviewer may lead to unexpected behavior. Changing the eventKey to 'pr:opened' and removing 'addedReviewers' and 'removedReviewers' fields could cause downstream systems to misinterpret the original intent of the event. Verify that this transformation is safe and correctly handled by the receiving system.
+
+
+
+[**Error Handling**](https://sberworks.ru/bitbucket-ci/projects/SBLOOM/repos/mediaplanner/pull-requests/71/diff#qodo-trigger%2FJenkinsfile-trigger.groovy?t=124)
+
+The pipeline does not seem to have explicit error handling for cases where the httpRequest to the Qodo webhook fails beyond logging the response status. Consider adding more robust error handling, such as retries or notifications, to ensure failures are properly managed.
+
+
+
+[**Duplicate Logic**](https://sberworks.ru/bitbucket-ci/projects/SBLOOM/repos/mediaplanner/pull-requests/71/diff#qodo%2FJenkinsfile-trigger.groovy?t=1)
+
+This file appears to be a duplicate or older version of the Jenkinsfile in the qodo-trigger directory. Having duplicate pipeline definitions can lead to maintenance issues and confusion. Ensure that only one canonical version exists and the other is removed.
+
+
+
+",0,0,0,{},0,[]
+SBLOOM/mediaplanner,59,added Jenkinsfile,1139544,2026-03-19,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 4 🔵🔵🔵🔵⚪
+
+### 🧪 No relevant tests
+
+### 🔒 Security concerns
+
+**Sensitive information exposure:**
+ The Jenkinsfile transmits PR details, including comments and author information, to an external webhook URL. If this endpoint is not secure or becomes compromised, sensitive project data could be exposed. Additionally, the lack of input sanitization increases the risk of data injection attacks through user comments.
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Security Vulnerability**](https://sberworks.ru/bitbucket-ci/projects/SBLOOM/repos/mediaplanner/pull-requests/59/diff#qodo%2FJenkinsfile-trigger?t=152)
+
+The Jenkinsfile sends a webhook to an external URL (https://steel-bloom-test.spasibotest.ru/webhook/webhook) containing potentially sensitive PR information and user comments. This could expose internal data if the target endpoint is compromised or not properly secured. Ensure the target URL is trusted and consider sanitizing or encrypting sensitive data before transmission.
+
+
+
+[**Input Sanitization**](https://sberworks.ru/bitbucket-ci/projects/SBLOOM/repos/mediaplanner/pull-requests/59/diff#qodo%2FJenkinsfile-trigger?t=212)
+
+The `extractCommand` function and JSON payload construction directly embed user-provided comment text without proper sanitization. This can lead to injection vulnerabilities if the comment contains malicious content. Validate and sanitize all user inputs, especially those used in JSON construction or command processing.
+
+
+
+[**Hardcoded Fallback Values**](https://sberworks.ru/bitbucket-ci/projects/SBLOOM/repos/mediaplanner/pull-requests/59/diff#qodo%2FJenkinsfile-trigger?t=106)
+
+The JSON payload uses hardcoded fallback values for PR details (e.g., PR ID 241, branch 'sbloom-test-with-kafka'). This can cause incorrect behavior or confusion during testing/execution. Consider making these values configurable or ensuring they are clearly marked as test defaults.
+
+
+
+",0,0,0,{},0,[]
+SBLOOM/mediaplanner,59,added Jenkinsfile,1139543,2026-03-19,qodo/Jenkinsfile-trigger,212,212,NORMAL,"**Suggestion:** Proposed documentation
+```suggestion
+/**
+ * Извлекает команду с аргументами из текста комментария.
+ *
+ * @param comment Текст комментария
+ * @param commandName Название команды для поиска
+ * @return Строка с командой и аргументами или только название команды
+ */
+def extractCommand(String comment, String commandName) {
+```",0,0,0,{},0,[]
+SBLOOM/mediaplanner,59,added Jenkinsfile,1139542,2026-03-19,qodo/Jenkinsfile-trigger,1,1,NORMAL,"**Suggestion:** Proposed documentation
+```suggestion
+/**
+ * Jenkins Pipeline для обработки команд Qodo из комментариев к Pull Request.
+ *
+ * Этот pipeline запускается при получении webhook и анализирует параметры,
+ * переданные через комментарий к PR. Поддерживаются следующие команды:
+ * - /improve - улучшение кода
+ * - /review - ревью кода
+ * - /add_docs - добавление документации
+ * - /describe - описание изменений
+ *
+ * Pipeline состоит из трех основных этапов:
+ * 1. Debug Parameters - анализ и логирование входных параметров
+ * 2. Send Webhook with command - отправка команды в Qodo webhook
+ * 3. Skip - No Qodo Command - пропуск выполнения при отсутствии команд
+ */
+pipeline {
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1134672,2026-03-11,,,,NORMAL,Failed to generate code suggestions for PR,0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133139,2026-03-05,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 4 🔵🔵🔵🔵⚪
+
+### 🧪 PR contains tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Missing default values for logging levels**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#src%2Fmain%2Fresources%2Fapplication.yaml?t=98)
+
+Default logging levels are not specified for all components. It is recommended to specify them explicitly.
+
+
+
+[**Missing default values for logging levels**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#src%2Ftest%2Fresources%2Fapplication-test.yml?t=53)
+
+Default logging levels are not specified for all components. It is recommended to specify them explicitly.
+
+
+
+",1,0,0,"{""thumbsup"": 1}",0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133136,2026-03-05,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 4 🔵🔵🔵🔵⚪
+
+### 🧪 PR contains tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Missing default values for DB_HOST, DB_PORT, DB_NAME, DB_SCHEMA**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#src%2Fmain%2Fresources%2Fapplication.yaml?t=7)
+
+Default values for these database-related settings are not specified, which could lead to runtime failures if they are not configured properly.
+
+
+
+[**Missing default values for DB_HOST, DB_PORT, DB_NAME, DB_SCHEMA**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#src%2Ftest%2Fresources%2Fapplication-test.yml?t=6)
+
+Default values for these database-related settings are not specified, which could lead to runtime failures if they are not configured properly.
+
+
+
+[**Potential typo in ""Shpargalka""**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#CHEATSET.md?t=1)
+
+The term ""Shpargalka"" appears to be misspelled as ""Шпаргалка"". It would be better to use the correct spelling.
+
+
+
+",1,0,0,"{""thumbsup"": 1}",0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133134,2026-03-05,,,,NORMAL,Failed to generate code suggestions for PR,0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133129,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/observability/tracing/CorrelationIdHolder.java,38,38,NORMAL,"**Suggestion:** The current implementation may return inconsistent results if both `CORRELATION_ID` and `MDC` contain different values. Prioritize one source or synchronize them properly to ensure consistency across logging contexts.
+Ensure that the correlation ID retrieved is consistent regardless of where it was initially stored. [general, importance: 8]
+
+
+```diff
+ public static String get() {
+     String id = CORRELATION_ID.get();
+     if (id == null) {
+         id = MDC.get(CorrelationIdInterceptor.MDC_CORRELATION_ID);
++        if (id != null) {
++            CORRELATION_ID.set(id); // Synchronize ThreadLocal with MDC
++        }
+     }
+     return id;
+ }
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133128,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/adapter/out/executor/ExecutorAdapter.java,58,58,NORMAL,"**Suggestion:** The error handling logic duplicates exception creation within both `onStatus` callbacks and the `catch` blocks. This can lead to inconsistent error messages and handling. Consolidate the error handling by removing the `onStatus` callbacks and relying solely on the `catch` blocks for a unified approach.
+Also, ensure that the response DTO (`ExecutionRequest`) matches the actual response structure from the executor to prevent runtime deserialization errors. [possible issue, importance: 7]
+
+
+```diff
+ ExecutionRequest executionRequest = ExecutionRequest.builder()
+                 .pipelineId(pipelineId)
+                 .build();
+ 
+         try {
+-            ExecutionRequest response = webClient.post()
+-                    .uri(""/api/v1/executions"")
++            ExecutionResponse response = webClient.post() // Assuming ExecutionResponse is the correct response DTO
++                    .uri(""/api/v1/execute"")
+                     .header(""X-Correlation-ID"", correlationId != null
+                             ? correlationId.toString() : UUID.randomUUID().toString())
+                     .bodyValue(executionRequest)
+                     .retrieve()
+-                    .onStatus(HttpStatusCode::is4xxClientError, clientResponse ->
+-                            clientResponse.bodyToMono(String.class)
+-                                    .map(body -> new ExecutorBusinessException(""Executor rejected request: "" + body)))
+-                    .onStatus(HttpStatusCode::is5xxServerError, clientResponse ->
+-                            clientResponse.bodyToMono(String.class)
+-                                    .map(body -> new ExecutorCommunicationException(""Executor server error: "" + body, null)))
+-                    .bodyToMono(ExecutionRequest.class)
++                    .bodyToMono(ExecutionResponse.class)
+                     .timeout(Duration.ofSeconds(timeoutSeconds))
+                     .block();
+ 
++            if (response == null || response.getSessionId() == null) {
++                throw new ExecutorCommunicationException(""Empty response from executor"", null);
++            }
++
++            log.info(""Запрос на выполнение принят: pipelineId={}, sessionId={}"",
++                    pipelineId, response.getSessionId());
++
++            return response.getSessionId();
++        } catch (WebClientRequestException e) {
++            log.error(""Сетевая ошибка при связи с executor: {}"", e.getMessage());
++            throw new ExecutorCommunicationException(""Network error: "" + e.getMessage(), e);
++        } catch (WebClientResponseException e) {
++            log.error(""Executor вернул ошибку: status={}, body={}"",
++                    e.getStatusCode(), e.getResponseBodyAsString());
++
++            if (e.getStatusCode().is4xxClientError()) {
++                throw new ExecutorBusinessException(""Executor rejected: "" + e.getResponseBodyAsString());
++            }
++            throw new ExecutorCommunicationException(""Executor error: "" + e.getMessage(), e);
++        }
++
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133127,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/adapter/out/quartz/PipelineExecutionJob.java,19,19,NORMAL,"**Suggestion:** The field `executorPort` is annotated with `@Autowired` but is also assigned in the constructor. Since it's a constructor-injected field, the `@Autowired` annotation is redundant and can be removed to avoid confusion. Additionally, the field should not be `final` if it's being set via constructor injection in a way that Spring manages. [general, importance: 5]
+
+
+```diff
+-@Autowired
+-private final ExecutorPort executorPort;
++private ExecutorPort executorPort;
+ 
+ public PipelineExecutionJob(ExecutorPort executorPort) {
+     this.executorPort = executorPort;
+ }
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133126,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/adapter/out/executor/ExecutorAdapter.java,63,63,NORMAL,"**Suggestion:** The current implementation sends requests to `/api/v1/executions`, but based on the test cases and typical REST conventions, it should likely be `/api/v1/execute`. This mismatch could lead to 404 errors. Align the endpoint with the expected API contract.
+Also, consider that the response type should match the actual response payload from the executor service. If the executor returns a different structure, using `ExecutionRequest` as the response type might cause deserialization issues. [possible issue, importance: 8]
+
+
+```diff
+ ExecutionRequest response = webClient.post()
+-                .uri(""/api/v1/executions"")
++                .uri(""/api/v1/execute"")
+                 .header(""X-Correlation-ID"", correlationId != null
+                         ? correlationId.toString() : UUID.randomUUID().toString())
+                 .bodyValue(executionRequest)
+                 .retrieve()
+                 .onStatus(HttpStatusCode::is4xxClientError, clientResponse ->
+                         clientResponse.bodyToMono(String.class)
+                                 .map(body -> new ExecutorBusinessException(""Executor rejected request: "" + body)))
+                 .onStatus(HttpStatusCode::is5xxServerError, clientResponse ->
+                         clientResponse.bodyToMono(String.class)
+                                 .map(body -> new ExecutorCommunicationException(""Executor server error: "" + body, null)))
+-                .bodyToMono(ExecutionRequest.class)
++                .bodyToMono(ExecutionResponse.class) // Assuming ExecutionResponse is the correct response DTO
+                 .timeout(Duration.ofSeconds(timeoutSeconds))
+                 .block();
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133120,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/application/usecase/schedule/CreateScheduleUseCase.java,48,48,NORMAL,"**Suggestion:** The generic `catch (Exception e)` block may hide underlying issues by wrapping them in a `SchedulingException`. Catch more specific exceptions (e.g., `SchedulerPort.SchedulerException`) before the generic one to preserve meaningful error details and avoid masking unexpected errors. [general, importance: 7]
+
+
+```diff
+ } catch (SchedulerPort.InvalidCronExpressionException e) {
+     throw new SchedulingException(""Неверное cron-выражение: "" + cronExpression, e);
++} catch (SchedulerPort.SchedulerException e) {
++    throw new SchedulingException(""Ошибка планировщика: "" + e.getMessage(), e);
+ } catch (SchedulingException e) {
+     throw e;
+ } catch (Exception e) {
+-    log.error(""Ошибка создания расписания для маршрута: {}"", pipelineId, e);
+-    throw new SchedulingException(""Ошибка создания расписания: "" + e.getMessage(), e);
++    log.error(""Неожиданная ошибка создания расписания для маршрута: {}"", pipelineId, e);
++    throw new SchedulingException(""Неожиданная ошибка создания расписания: "" + e.getMessage(), e);
+ }
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133119,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/observability/tracing/CorrelationIdHolder.java,38,38,NORMAL,"**Suggestion:** The `get()` method attempts to retrieve the correlation ID from MDC if not found in `ThreadLocal`. However, `CorrelationIdInterceptor` also stores the ID in MDC, leading to potential redundancy. Simplify by relying solely on `ThreadLocal` for consistency and performance, since the interceptor already synchronizes it with MDC. [general, importance: 5]
+
+
+```diff
+ public static String get() {
+-    String id = CORRELATION_ID.get();
+-    if (id == null) {
+-        id = MDC.get(CorrelationIdInterceptor.MDC_CORRELATION_ID);
+-    }
+-    return id;
++    return CORRELATION_ID.get();
+ }
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133118,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/adapter/in/rest/TriggerController.java,42,42,NORMAL,"**Suggestion:** The current implementation may throw `IllegalArgumentException` if the `correlationId` header is not a valid UUID string. This exception is not handled and can lead to a 500 server error. Validate and handle invalid correlation IDs gracefully by generating a new UUID when parsing fails. [general, importance: 8]
+
+
+```diff
+ UUID sessionId = triggerService.executeManualTrigger(
+         request.getPipelineId(),
+-        correlationId != null ? UUID.fromString(correlationId) : UUID.randomUUID()
++        parseOrGenerateCorrelationId(correlationId)
+ );
+ 
++// Helper method
++private UUID parseOrGenerateCorrelationId(String correlationId) {
++    if (correlationId == null || correlationId.isBlank()) {
++        return UUID.randomUUID();
++    }
++    try {
++        return UUID.fromString(correlationId);
++    } catch (IllegalArgumentException e) {
++        log.warn(""Invalid correlation ID format: {}. Generating new one."", correlationId);
++        return UUID.randomUUID();
++    }
++}
++
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133117,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/adapter/out/quartz/PipelineExecutionJob.java,39,39,NORMAL,"**Suggestion:** The `JobExecutionException` is re-throwing exceptions with `refireImmediately` set to `false`. For transient issues like network glitches, it might be beneficial to allow immediate refiring. Consider making this configurable or setting it to `true` for recoverable errors to improve resilience. [general, importance: 5]
+
+
+```diff
+ try {
+             log.info(""Выполнение запланированной задачи маршрута: pipelineId={}, fireTime={}, scheduledFireTime={}"",
+                     pipelineId,
+                     context.getFireTime(),
+                     context.getScheduledFireTime());
+ 
+             UUID sessionId = executorPort.execute(pipelineId, correlationId);
+ 
+             log.info(""Выполнение маршрута успешно запущено: pipelineId={}, sessionId={}"",
+                     pipelineId, sessionId);
+ 
+             context.setResult(sessionId);
+ 
+         } catch (ExecutorPort.ExecutorCommunicationException e) {
+             log.error(""Ошибка связи с executor для маршрута: {}"", pipelineId, e);
+-            throw new JobExecutionException(""Executor communication failed: "" + e.getMessage(), e, false);
++            throw new JobExecutionException(""Executor communication failed: "" + e.getMessage(), e, true);
+ 
+         } catch (ExecutorPort.ExecutorBusinessException e) {
+             log.warn(""Executor отклонил выполнение маршрута: pipelineId={}, reason={}"",
+                     pipelineId, e.getMessage());
+             throw new JobExecutionException(""Executor rejected execution: "" + e.getMessage(), e, false);
+ 
+         } catch (Exception e) {
+             log.error(""Непредвиденная ошибка при выполнении маршрута: {}"", pipelineId, e);
+-            throw new JobExecutionException(""Unexpected error: "" + e.getMessage(), e, false);
++            throw new JobExecutionException(""Unexpected error: "" + e.getMessage(), e, true);
+ 
+         } finally {
+             MDC.remove(MDC_CORRELATION_ID);
+             MDC.remove(MDC_PIPELINE_ID);
+         }
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133116,2026-03-05,src/main/java/ru/spasibo/bilt/fdedispatcher/adapter/out/executor/ExecutorAdapter.java,63,63,NORMAL,"**Suggestion:** The current implementation sends requests to `/api/v1/executions`, but based on the test cases and typical REST conventions, it should likely be `/api/v1/execute`. This mismatch could lead to 404 errors in production. Align the endpoint with the actual executor service API. [possible issue, importance: 8]
+
+
+```diff
+ ExecutionRequest response = webClient.post()
+-                .uri(""/api/v1/executions"")
++                .uri(""/api/v1/execute"")
+                 .header(""X-Correlation-ID"", correlationId != null
+                         ? correlationId.toString() : UUID.randomUUID().toString())
+                 .bodyValue(executionRequest)
+                 .retrieve()
+                 .onStatus(HttpStatusCode::is4xxClientError, clientResponse ->
+                         clientResponse.bodyToMono(String.class)
+                                 .map(body -> new ExecutorBusinessException(""Executor rejected request: "" + body)))
+                 .onStatus(HttpStatusCode::is5xxServerError, clientResponse ->
+                         clientResponse.bodyToMono(String.class)
+                                 .map(body -> new ExecutorCommunicationException(""Executor server error: "" + body, null)))
+                 .bodyToMono(ExecutionRequest.class)
+                 .timeout(Duration.ofSeconds(timeoutSeconds))
+                 .block();
+```",0,0,0,{},0,[]
+BILT/fde-dispatcher,56,Feature/BILT-527 epic fde dispatcher,1133115,2026-03-05,,,,NORMAL,"## PR Reviewer Guide 🔍
+
+Here are some key observations to aid the review process:
+
+### ⏱️ Estimated effort to review: 4 🔵🔵🔵🔵⚪
+
+### 🧪 PR contains tests
+
+### 🔒 No security concerns identified
+
+### ⚡ Recommended focus areas for review
+
+#### 
+[**Error Handling**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#src%2Fmain%2Fjava%2Fru%2Fspasibo%2Fbilt%2Ffdedispatcher%2Fadapter%2Fout%2Fexecutor%2FExecutorAdapter.java?t=69)
+
+The error handling logic for WebClient responses appears to have duplicated exception mapping. Both `onStatus` handlers and explicit catch blocks map 4xx/5xx responses to exceptions, which could lead to redundant logging or inconsistent error propagation. Consider consolidating this logic.
+
+
+
+[**Schedule State Mapping**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#src%2Fmain%2Fjava%2Fru%2Fspasibo%2Fbilt%2Ffdedispatcher%2Fadapter%2Fout%2Fquartz%2FQuartzSchedulerAdapter.java?t=146)
+
+The logic for determining if a schedule is active includes `COMPLETE` and `BLOCKED` states as active. This might be misleading since these states don't represent currently executing schedules. Verify if this mapping aligns with business requirements.
+
+
+
+[**Dependency Management**](https://sberworks.ru/bitbucket-ci/projects/BILT/repos/fde-dispatcher/pull-requests/56/diff#pom.xml?t=8)
+
+Several dependencies were removed including Groovy, Spock, OkHttp versions, Flyway, and MLKPP libraries. Ensure that these removals don't impact existing functionality or testing capabilities, especially regarding database migrations and integration tests.
+
+
+
+",0,0,0,{},0,[]

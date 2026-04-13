@@ -379,6 +379,27 @@ judge:
 
 ---
 
+### `acceptance` — метрики по поколению агента (diffgraph)
+
+Показывает acceptance rate для конкретного prompt hash из diffgraph. Связь через тег `` `dg:gen:hash:run` `` в комментариях агента.
+
+```bash
+.venv/bin/python pr_analytics.py acceptance --dg-hash f7917d6
+.venv/bin/python pr_analytics.py acceptance --dg-hash f7917d6 --format json
+```
+
+| Параметр | Описание |
+|---|---|
+| `--dg-hash` | Prompt hash из diffgraph (первые 7 символов) |
+| `--since` | Начало периода (YYYY-MM-DD) |
+| `--format` | `text` (по умолчанию) или `json` |
+
+Вывод: acceptance_rate, false_positive_rate, feedback_rate, total/analyzed/accepted/rejected counts.
+
+**Тег извлекается автоматически** при кешировании комментариев. Формат: `` `dg:<generation>:<hash>:<run_id>` ``. Хранится в колонках `dg_gen`, `dg_hash`, `dg_run` таблицы `pr_comments`.
+
+---
+
 ### `review-feedback` — обратная связь AI-агента
 
 Выгружает корневые комментарии указанного автора вместе с реакциями людей и ответами в треде. Предназначена для анализа качества код-ревью AI-агента.

@@ -132,6 +132,14 @@ def open_db(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA_SQL)
+    # Migrate: add dg tag columns if missing
+    try:
+        conn.execute("SELECT dg_gen FROM pr_comments LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE pr_comments ADD COLUMN dg_gen TEXT")
+        conn.execute("ALTER TABLE pr_comments ADD COLUMN dg_hash TEXT")
+        conn.execute("ALTER TABLE pr_comments ADD COLUMN dg_run TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_dg_hash ON pr_comments(dg_hash)")
     conn.commit()
     return conn
 
@@ -198,18 +206,24 @@ def insert_comment(
     parent_id: Optional[int],
     anchor: Optional[dict],
 ) -> None:
+    # Extract diffgraph metadata tag if present
+    from .dg_tag import extract_dg_tag
+    text = comment.get("text", "")
+    dg = extract_dg_tag(text)
+
     conn.execute(
         """INSERT OR REPLACE INTO pr_comments
            (id, repo_id, pr_id, parent_id, author, text, created_date, updated_date,
-            severity, state, file_path, line, line_type, file_type)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            severity, state, file_path, line, line_type, file_type,
+            dg_gen, dg_hash, dg_run)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             comment["id"],
             repo_id,
             pr_id,
             parent_id,
             comment.get("author", {}).get("slug", ""),
-            comment.get("text", ""),
+            text,
             comment.get("createdDate"),
             comment.get("updatedDate"),
             comment.get("severity", "NORMAL"),
@@ -218,6 +232,9 @@ def insert_comment(
             anchor.get("line") if anchor else None,
             anchor.get("lineType") if anchor else None,
             anchor.get("fileType") if anchor else None,
+            dg["gen"] if dg else None,
+            dg["hash"] if dg else None,
+            dg["run"] if dg else None,
         ),
     )
 
