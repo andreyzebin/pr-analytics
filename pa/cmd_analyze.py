@@ -312,16 +312,45 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
             log.warning("Failed to judge comment %d: %s", comment_id, exc)
             print(f"  [{i}/{total}]  comment#{comment_id}  ERROR: {exc}", flush=True)
 
+    # ── full summary (including previously cached results) ─────────────────
+    summary_q = """
+        SELECT ca.verdict, COUNT(*) AS cnt
+        FROM comment_analysis ca
+        JOIN pr_comments c ON c.id = ca.comment_id
+        JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+        WHERE c.author = ? AND ca.judge_model = ?
+          AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
+    """
+    summary_params: list = [author, judge_model]
+    if since_ts:
+        summary_q += " AND pr.created_date >= ?"
+        summary_params.append(since_ts)
+    if until_ts:
+        summary_q += " AND pr.created_date <= ?"
+        summary_params.append(until_ts)
+    if repo_ids:
+        summary_q += f" AND c.repo_id IN ({','.join('?' * len(repo_ids))})"
+        summary_params.extend(repo_ids)
+    summary_q += " GROUP BY ca.verdict"
+
+    all_verdicts = {r["verdict"]: r["cnt"] for r in conn.execute(summary_q, summary_params).fetchall()}
+    all_yes = all_verdicts.get("yes", 0)
+    all_no = all_verdicts.get("no", 0)
+    all_unclear = all_verdicts.get("unclear", 0)
+    all_total = all_yes + all_no + all_unclear
+    from_cache = all_total - (n_yes + n_no + n_unclear)
+    all_decided = all_yes + all_no
+    all_rate = f"{all_yes / all_decided * 100:.0f}%" if all_decided else "n/a"
+
     conn.close()
 
     elapsed = time.monotonic() - start
-    total_decided = n_yes + n_no
-    rate = f"{n_yes / total_decided * 100:.0f}%" if total_decided else "n/a"
     tokens_summary = f"  tokens={total_tokens:,}" if total_tokens else ""
     print(
-        f"\nDone in {int(elapsed)}s. "
-        f"yes={n_yes}  no={n_no}  unclear={n_unclear}  error={n_error}  "
-        f"acceptance={rate}{tokens_summary}  (judge={judge_model})\n"
+        f"\nDone in {int(elapsed)}s.  new: yes={n_yes} no={n_no} unclear={n_unclear} error={n_error}{tokens_summary}"
+        f"\n\nTotal (incl. {from_cache} from cache):  "
+        f"yes={all_yes}  no={all_no}  unclear={all_unclear}  "
+        f"acceptance={all_rate}  (judge={judge_model})\n"
         f"Note: only comments with reactions or replies were analyzed "
         f"({skipped_no_feedback} without feedback were skipped)"
     )

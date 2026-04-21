@@ -499,13 +499,50 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             log.warning("Failed to analyze comment %d: %s", comment_id, exc)
             print(f"  [{i}/{total}]  comment#{comment_id}  ERROR: {exc}", flush=True)
 
+    # ── full summary (including previously cached results) ─────────────────
+    summary_q = """
+        SELECT ma.verdict, COUNT(*) AS cnt
+        FROM merge_analysis ma
+        JOIN pr_comments c ON c.id = ma.comment_id
+        JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+        WHERE c.author = ? AND ma.judge_model = ?
+          AND c.parent_id IS NULL AND c.file_path IS NOT NULL
+          AND pr.state = 'MERGED' AND pr.closed_date IS NOT NULL
+          AND ma.analyzed_at = (
+              SELECT MAX(ma2.analyzed_at) FROM merge_analysis ma2
+              WHERE ma2.comment_id = ma.comment_id AND ma2.judge_model = ma.judge_model
+          )
+    """
+    summary_params: list = [author, judge_model]
+    if since_ts:
+        summary_q += " AND pr.created_date >= ?"
+        summary_params.append(since_ts)
+    if until_ts:
+        summary_q += " AND pr.created_date <= ?"
+        summary_params.append(until_ts)
+    if repo_ids:
+        summary_q += f" AND c.repo_id IN ({','.join('?' * len(repo_ids))})"
+        summary_params.extend(repo_ids)
+    summary_q += " GROUP BY ma.verdict"
+
+    all_verdicts = {r["verdict"]: r["cnt"] for r in conn.execute(summary_q, summary_params).fetchall()}
+    all_yes = all_verdicts.get("YES", 0)
+    all_partial = all_verdicts.get("PARTIAL", 0)
+    all_no = all_verdicts.get("NO", 0)
+    all_total = all_yes + all_partial + all_no
+    from_cache = all_total - (n_yes + n_partial + n_no)
+    all_rate = (
+        f"{(all_yes + all_partial * 0.5) / all_total * 100:.0f}%"
+        if all_total else "n/a"
+    )
+
     conn.close()
 
     elapsed = time.monotonic() - start
-    total_decided = n_yes + n_partial + n_no
-    rate = f"{(n_yes + n_partial * 0.5) / total_decided * 100:.0f}%" if total_decided else "n/a"
     print(
-        f"\nDone in {int(elapsed)}s. "
-        f"YES={n_yes}  PARTIAL={n_partial}  NO={n_no}  skip={n_skip}  error={n_error}  "
-        f"merge_acceptance={rate}  tokens={total_tokens:,}  (judge={judge_model})"
+        f"\nDone in {int(elapsed)}s.  new: YES={n_yes} PARTIAL={n_partial} NO={n_no}"
+        f"  skip={n_skip} error={n_error}  tokens={total_tokens:,}"
+        f"\n\nTotal (incl. {from_cache} from cache, latest version per comment):  "
+        f"YES={all_yes}  PARTIAL={all_partial}  NO={all_no}  "
+        f"merge_acceptance={all_rate}  (judge={judge_model})"
     )
