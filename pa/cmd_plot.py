@@ -454,11 +454,11 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     all_buckets: set[str] = set()
     metric_results: dict[str, list[tuple[str, dict]]] = {}
 
-    # ── semantic_acceptance_rate: special fetch from comment_analysis ──────────
-    if "semantic_acceptance_rate" in requested_metrics:
+    # ── feedback_acceptance_rate: special fetch from comment_analysis ──────────
+    if "feedback_acceptance_rate" in requested_metrics:
         author = getattr(args, "author", None)
         if not author:
-            log.error("--author is required for semantic_acceptance_rate metric")
+            log.error("--author is required for feedback_acceptance_rate metric")
             sys.exit(1)
         judge_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
         conn2 = open_db(db_path)
@@ -474,7 +474,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         conn2.close()
 
         # Build a set of (repo_id, pr_id) per series, then compute rate per bucket
-        # semantic_acceptance_rate is not split-aware — one global series
+        # feedback_acceptance_rate is not split-aware — one global series
         yes_buckets: dict[str, int] = {}
         total_buckets: dict[str, int] = {}
         for r in sar_rows:
@@ -488,13 +488,13 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             bk: yes_buckets.get(bk, 0) / total_buckets[bk] * 100
             for bk in total_buckets
         }
-        metric_results["semantic_acceptance_rate"] = [(f"{author} ({judge_model})", sar_buckets)]
+        metric_results["feedback_acceptance_rate"] = [(f"{author} ({judge_model})", sar_buckets)]
         all_buckets.update(sar_buckets.keys())
 
-    # ── semantic_acceptance_rate_all: yes / total_comments (incl. no-feedback) ─
-    if "semantic_acceptance_rate_all" in requested_metrics:
+    # ── feedback_acceptance_rate_all: yes / total_comments (incl. no-feedback) ─
+    if "feedback_acceptance_rate_all" in requested_metrics:
         if not author_arg:
-            log.error("--author is required for semantic_acceptance_rate_all metric")
+            log.error("--author is required for feedback_acceptance_rate_all metric")
             sys.exit(1)
         judge_model_all = resolve_judge_model(getattr(args, "judge_model", None), cfg)
         conn_sara = open_db(db_path)
@@ -530,7 +530,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             bk: yes_per_bk.get(bk, 0) / total * 100
             for bk, total in total_per_bk_all.items() if total > 0
         }
-        metric_results["semantic_acceptance_rate_all"] = [
+        metric_results["feedback_acceptance_rate_all"] = [
             (f"{author_arg} ({judge_model_all})", sara_buckets)
         ]
         all_buckets.update(sara_buckets.keys())
@@ -617,7 +617,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         all_buckets.update(mar_buckets.keys())
 
     for metric_name in requested_metrics:
-        if metric_name in ("semantic_acceptance_rate", "semantic_acceptance_rate_all",
+        if metric_name in ("feedback_acceptance_rate", "feedback_acceptance_rate_all",
                            "feedback_rate", "merge_acceptance_rate"):
             continue  # already handled above
         mdef = METRICS[metric_name]

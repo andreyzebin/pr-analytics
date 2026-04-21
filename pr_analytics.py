@@ -93,9 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--layout", default="stack", choices=["stack", "overlay"],
                    help="Layout when multiple metrics: stack (default) or overlay (dual y-axis, max 2 metrics)")
     p.add_argument("--author", default=None,
-                   help="AI agent slug — required for semantic_acceptance_rate metric")
+                   help="AI agent slug — required for feedback_acceptance_rate metric")
     p.add_argument("--judge-model", default=None, dest="judge_model",
-                   help=f"LLM judge model for semantic_acceptance_rate (default: {DEFAULT_JUDGE_MODEL})")
+                   help=f"LLM judge model for feedback_acceptance_rate (default: {DEFAULT_JUDGE_MODEL})")
     p.add_argument("--output", default="output/chart.png", help="Output file (.png/.svg)")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
