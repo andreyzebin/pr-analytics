@@ -15,7 +15,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from pa.api import api_get, make_session
+from pa.api import api_get, make_session, paginate
 from pa.config import (
     resolve_db, resolve_judge_api_key, resolve_judge_base_url,
     resolve_judge_model, resolve_token, resolve_url,
@@ -140,6 +140,114 @@ def _fetch_source_snippet(
         return None
 
 
+# Cache: (repo_id, pr_id) → list of {hash, message, timestamp, files: [path, ...], node_type: ...}
+_commits_cache: dict[tuple, list[dict]] = {}
+
+
+def _fetch_pr_commits(
+    session, bb_url: str,
+    project_key: str, repo_slug: str, pr_id: int,
+    repo_id: int,
+) -> list[dict]:
+    """Fetch commits for a PR with changed files per commit. Cached per (repo_id, pr_id)."""
+    key = (repo_id, pr_id)
+    if key in _commits_cache:
+        return _commits_cache[key]
+
+    url = (
+        f"{bb_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
+        f"/pull-requests/{pr_id}/commits"
+    )
+    try:
+        raw_commits = paginate(session, url, limit=100)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log.debug("Cannot fetch commits for %s/%s#%d: %s", project_key, repo_slug, pr_id, exc)
+        _commits_cache[key] = []
+        return []
+
+    result = []
+    for c in raw_commits:
+        commit_hash = c.get("id", "")[:8]
+        message = (c.get("message") or "").split("\n")[0][:80]
+        ts = c.get("authorTimestamp", 0)
+
+        # Fetch changed files for this commit
+        changes_url = (
+            f"{bb_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
+            f"/commits/{c['id']}/changes"
+        )
+        files = []
+        node_types = {}  # path → nodeType (FILE, SUBMODULE, etc.) or changeType (ADD, MODIFY, DELETE, RENAME, COPY)
+        try:
+            changes = paginate(session, changes_url, limit=100)
+            for ch in changes:
+                path_obj = ch.get("path") or {}
+                path = path_obj.get("toString", "")
+                if path:
+                    files.append(path)
+                    ct = ch.get("type", "MODIFY")  # ADD, MODIFY, DELETE, RENAME, COPY
+                    node_types[path] = ct
+                # Also track source path for renames
+                src_path_obj = ch.get("srcPath") or {}
+                src_path = src_path_obj.get("toString", "")
+                if src_path and src_path != path:
+                    files.append(src_path)
+                    node_types[src_path] = "RENAME_SOURCE"
+        except Exception:
+            pass  # best-effort
+
+        result.append({
+            "hash": commit_hash,
+            "message": message,
+            "timestamp": ts,
+            "files": files,
+            "change_types": node_types,
+        })
+
+    _commits_cache[key] = result
+    return result
+
+
+def _build_commits_context(
+    commits: list[dict],
+    comment_created_date: int,
+    anchor_file: str,
+) -> tuple[str, bool]:
+    """Build human-readable commit list after comment, return (text, anchor_file_touched).
+    Returns (context_string, was_file_touched_after_comment)."""
+    after = [c for c in commits if c["timestamp"] > comment_created_date]
+    if not after:
+        return "Нет коммитов после комментария.", False
+
+    after.sort(key=lambda c: c["timestamp"])
+    lines = []
+    anchor_touched = False
+    for c in after:
+        ts_str = ms_to_date(c["timestamp"])
+        files_str = ", ".join(c["files"][:10])
+        if len(c["files"]) > 10:
+            files_str += f", ... (+{len(c['files']) - 10})"
+        lines.append(f"  - {c['hash']} ({ts_str}) \"{c['message']}\" — files: {files_str}")
+
+        # Check if anchor file was touched (exact match or rename)
+        for f in c["files"]:
+            if f == anchor_file:
+                ct = c["change_types"].get(f, "MODIFY")
+                if ct == "DELETE":
+                    lines.append(f"    ⚠ Файл {anchor_file} УДАЛЁН в этом коммите")
+                elif ct == "RENAME_SOURCE":
+                    lines.append(f"    ⚠ Файл {anchor_file} ПЕРЕИМЕНОВАН (старое имя)")
+                anchor_touched = True
+
+    text = "\n".join(lines)
+    if not anchor_touched:
+        text += f"\n  ⚠ Файл {anchor_file} НЕ фигурирует ни в одном коммите после комментария."
+
+    return text, anchor_touched
+
+
 def _truncate_diff(diff: str, max_chars: int = 4000) -> str:
     if len(diff) <= max_chars:
         return diff
@@ -158,6 +266,7 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
     budget_tokens = getattr(args, "budget_tokens", None)
     max_comment_chars = getattr(args, "max_comment_chars", 2000)
     max_diff_chars = getattr(args, "max_diff_chars", 4000)
+    verbose = getattr(args, "verbose", False)
 
     bb_url = resolve_url(None, cfg)
     token = resolve_token(None, cfg)
@@ -204,8 +313,10 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             c.file_path,
             c.line,
             c.severity,
+            c.created_date AS comment_created_date,
             pr.title      AS pr_title,
             pr.closed_date,
+            pr.state      AS pr_state,
             r.project_key,
             r.slug
         FROM pr_comments c
@@ -214,6 +325,7 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
         WHERE c.author = ?
           AND c.parent_id IS NULL
           AND c.file_path IS NOT NULL
+          AND pr.state = 'MERGED'
           AND pr.closed_date IS NOT NULL
           AND NOT EXISTS (
               SELECT 1 FROM merge_analysis ma
@@ -313,6 +425,17 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             if snippet:
                 source_snippet = snippet
 
+        # Fetch PR commits and build post-comment context
+        commits = _fetch_pr_commits(
+            session, bb_url,
+            row["project_key"], row["slug"], row["pr_id"],
+            row["repo_id"],
+        )
+        comment_ts = row["comment_created_date"] or 0
+        commits_context, anchor_touched = _build_commits_context(
+            commits, comment_ts, row["file_path"],
+        )
+
         diff_truncated = _truncate_diff(diff_text, max_diff_chars)
         comment_text = (row["comment_text"] or "")[:max_comment_chars]
 
@@ -323,8 +446,16 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             line=anchor_line or "?",
             comment_text=comment_text,
             source_snippet=source_snippet or "(недоступен)",
+            commits_after=commits_context,
             diff_content=diff_truncated,
         )
+
+        if verbose:
+            print(f"\n{'═' * 80}")
+            print(f"[{i}/{total}]  {repo}#{row['pr_id']} {row['file_path']}:{anchor_line}")
+            print(f"{'─' * 80}")
+            print(prompt)
+            print(f"{'─' * 80}")
 
         try:
             data, tokens = judge.call_json(prompt)
@@ -352,9 +483,13 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
 
             elapsed = time.monotonic() - start
             eta = elapsed / i * (total - i)
+
+            if verbose:
+                print(f"RESPONSE: {data}")
+                print(f"{'═' * 80}")
             print(
-                f"  [{i}/{total}]  {repo}#{row['pr_id']} {row['file_path']}:{row['line']}"
-                f"  → {verdict} ({confidence:.1f})"
+                f"  [{i}/{total}]  {repo}#{row['pr_id']} {row['file_path']}:{anchor_line}"
+                f"  → {verdict} ({confidence:.1f}) \"{reasoning}\""
                 f"  [{int(elapsed)}s, ~{int(eta)}s left  {total_tokens:,}tok]",
                 flush=True,
             )
