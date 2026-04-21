@@ -135,7 +135,6 @@ CREATE TABLE IF NOT EXISTS merge_analysis (
     FOREIGN KEY (comment_id) REFERENCES pr_comments(id)
 );
 CREATE INDEX IF NOT EXISTS idx_merge_analysis_comment ON merge_analysis(comment_id);
-CREATE INDEX IF NOT EXISTS idx_merge_analysis_version ON merge_analysis(analyzer_version);
 """
 
 
@@ -159,26 +158,29 @@ def open_db(db_path: str) -> sqlite3.Connection:
     try:
         conn.execute("SELECT analyzer_version FROM merge_analysis LIMIT 0")
     except sqlite3.OperationalError:
-        conn.execute("ALTER TABLE merge_analysis RENAME TO _merge_analysis_old")
-        conn.executescript("""
-            CREATE TABLE merge_analysis (
-                comment_id       INTEGER NOT NULL,
-                judge_model      TEXT    NOT NULL,
-                analyzer_version TEXT    NOT NULL DEFAULT 'v0',
-                verdict          TEXT    NOT NULL CHECK(verdict IN ('YES','PARTIAL','NO')),
-                confidence       REAL,
-                reasoning        TEXT,
-                analyzed_at      INTEGER NOT NULL,
-                PRIMARY KEY (comment_id, judge_model, analyzer_version),
-                FOREIGN KEY (comment_id) REFERENCES pr_comments(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_merge_analysis_comment ON merge_analysis(comment_id);
-            CREATE INDEX IF NOT EXISTS idx_merge_analysis_version ON merge_analysis(analyzer_version);
-            INSERT INTO merge_analysis (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, analyzed_at)
-                SELECT comment_id, judge_model, 'v0', verdict, confidence, reasoning, analyzed_at
-                FROM _merge_analysis_old;
-            DROP TABLE _merge_analysis_old;
-        """)
+        has_old_data = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='merge_analysis'"
+        ).fetchone()[0]
+        if has_old_data:
+            conn.execute("ALTER TABLE merge_analysis RENAME TO _merge_analysis_old")
+            conn.executescript("""
+                CREATE TABLE merge_analysis (
+                    comment_id       INTEGER NOT NULL,
+                    judge_model      TEXT    NOT NULL,
+                    analyzer_version TEXT    NOT NULL DEFAULT 'v0',
+                    verdict          TEXT    NOT NULL CHECK(verdict IN ('YES','PARTIAL','NO')),
+                    confidence       REAL,
+                    reasoning        TEXT,
+                    analyzed_at      INTEGER NOT NULL,
+                    PRIMARY KEY (comment_id, judge_model, analyzer_version),
+                    FOREIGN KEY (comment_id) REFERENCES pr_comments(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_merge_analysis_comment ON merge_analysis(comment_id);
+                INSERT INTO merge_analysis (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, analyzed_at)
+                    SELECT comment_id, judge_model, 'v0', verdict, confidence, reasoning, analyzed_at
+                    FROM _merge_analysis_old;
+                DROP TABLE _merge_analysis_old;
+            """)
 
     conn.commit()
     return conn
