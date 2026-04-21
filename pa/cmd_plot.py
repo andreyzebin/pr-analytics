@@ -576,6 +576,34 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         metric_results["feedback_rate"] = [(author_arg, fr_buckets)]
         all_buckets.update(fr_buckets.keys())
 
+    # ── feedback_all: absolute count of comments with feedback per period ─────
+    if "feedback_all" in requested_metrics:
+        if not author_arg:
+            log.error("--author is required for feedback_all metric")
+            sys.exit(1)
+        # Reuse fb_per_bk if already computed by feedback_rate, otherwise fetch
+        if "fb_per_bk" not in dir():
+            conn_fball = open_db(db_path)
+            fb_all_rows = conn_fball.execute("""
+                SELECT pr.closed_date, COUNT(*) AS cnt
+                FROM pr_comments c
+                JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+                WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
+                  AND (
+                      EXISTS (SELECT 1 FROM comment_reactions cr WHERE cr.comment_id = c.id)
+                      OR EXISTS (SELECT 1 FROM pr_comments reply
+                                 WHERE reply.parent_id = c.id AND reply.author != ?)
+                  )
+                GROUP BY pr.closed_date
+            """, (author_arg, author_arg)).fetchall()
+            conn_fball.close()
+            from collections import defaultdict as _dd_fba
+            fb_per_bk = _dd_fba(int)
+            for r in fb_all_rows:
+                fb_per_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
+        metric_results["feedback_all"] = [(author_arg, dict(fb_per_bk))]
+        all_buckets.update(fb_per_bk.keys())
+
     # ── merge_acceptance_rate: (YES + 0.5*PARTIAL) / (YES+PARTIAL+NO) per period
     if "merge_acceptance_rate" in requested_metrics:
         if not author_arg:
@@ -708,7 +736,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 all_buckets.update(data.keys())
 
     _special = {"feedback_acceptance_rate", "feedback_acceptance_rate_all",
-                "feedback_rate", "merge_acceptance_rate",
+                "feedback_rate", "feedback_all", "merge_acceptance_rate",
                 "agent_inline_comments"} | _fb_abs | _mr_abs
     for metric_name in requested_metrics:
         if metric_name in _special:

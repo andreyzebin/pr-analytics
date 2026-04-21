@@ -194,6 +194,10 @@ METRICS: dict[str, MetricDef] = {
         fmt=lambda v: f"{v:.0f}%",
     ),
     # ── Absolute count metrics (bar charts) ──────────────────────────────
+    "feedback_all": MetricDef(
+        label="Comments with Feedback", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
     "feedback_yes": MetricDef(
         label="Feedback: Accepted", unit="count", plot_kind="bar",
         compute=None, fmt=lambda v: str(int(v)),
