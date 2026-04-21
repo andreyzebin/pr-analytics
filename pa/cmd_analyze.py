@@ -93,6 +93,7 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
     judge_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
     batch_size = getattr(args, "batch_size", 50)
     dry_run = getattr(args, "dry_run", False)
+    force = getattr(args, "force", False)
     budget_tokens = getattr(args, "budget_tokens", None)   # None = unlimited
     max_comment_chars = getattr(args, "max_comment_chars", 2000)
 
@@ -144,17 +145,21 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
         WHERE c.author = ?
           AND c.parent_id IS NULL
           AND pr.closed_date IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM comment_analysis ca
-              WHERE ca.comment_id = c.id AND ca.judge_model = ?
-          )
           AND (
               EXISTS (SELECT 1 FROM comment_reactions cr WHERE cr.comment_id = c.id)
               OR EXISTS (SELECT 1 FROM pr_comments reply
                          WHERE reply.parent_id = c.id AND reply.author != ?)
           )
     """
-    params: list = [author, judge_model, author]
+    params: list = [author, author]
+    if not force:
+        q += """
+          AND NOT EXISTS (
+              SELECT 1 FROM comment_analysis ca
+              WHERE ca.comment_id = c.id AND ca.judge_model = ?
+          )
+        """
+        params.append(judge_model)
 
     if since_ts:
         q += " AND pr.created_date >= ?"

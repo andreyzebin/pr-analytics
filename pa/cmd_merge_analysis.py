@@ -267,6 +267,7 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
     max_comment_chars = getattr(args, "max_comment_chars", 2000)
     max_diff_chars = getattr(args, "max_diff_chars", 4000)
     verbose = getattr(args, "verbose", False)
+    force = getattr(args, "force", False)
 
     bb_url = resolve_url(None, cfg)
     token = resolve_token(None, cfg)
@@ -327,13 +328,17 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
           AND c.file_path IS NOT NULL
           AND pr.state = 'MERGED'
           AND pr.closed_date IS NOT NULL
+    """
+    params: list = [author]
+    if not force:
+        q += """
           AND NOT EXISTS (
               SELECT 1 FROM merge_analysis ma
               WHERE ma.comment_id = c.id AND ma.judge_model = ?
                 AND ma.analyzer_version = ?
           )
-    """
-    params: list = [author, judge_model, analyzer_version]
+        """
+        params.extend([judge_model, analyzer_version])
 
     if since_ts:
         q += " AND pr.created_date >= ?"
