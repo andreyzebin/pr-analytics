@@ -221,10 +221,19 @@ agent_comments → feedback_rate → semantic_acceptance_rate     (по фидб
 .venv/bin/python pr_analytics.py plot \
   --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
   --type trend --period week \
-  --metrics agent_comments,feedback_rate,semantic_acceptance_rate,semantic_acceptance_rate_all \
+  --metrics agent_comments,feedback_rate,semantic_acceptance_rate,merge_acceptance_rate \
   --author ai-review-bot \
   --split total \
   --layout stack --output output/agent_funnel.html
+
+# Сравнение acceptance по фидбеку vs по diff
+.venv/bin/python pr_analytics.py plot \
+  --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
+  --type trend --period month \
+  --metrics semantic_acceptance_rate,merge_acceptance_rate \
+  --author ai-review-bot \
+  --split total \
+  --layout stack --output output/acceptance_comparison.html
 
 # Сырые точки для отладки
 .venv/bin/python pr_analytics.py plot \
