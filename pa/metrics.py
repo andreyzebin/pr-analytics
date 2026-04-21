@@ -189,4 +189,29 @@ METRICS: dict[str, MetricDef] = {
         compute=None,
         fmt=lambda v: f"{v:.0f}%",
     ),
+    # ── Absolute count metrics (bar charts) ──────────────────────────────
+    "feedback_yes": MetricDef(
+        label="Feedback: Accepted", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
+    "feedback_no": MetricDef(
+        label="Feedback: Rejected", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
+    "feedback_unclear": MetricDef(
+        label="Feedback: Unclear", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
+    "merge_yes": MetricDef(
+        label="Merge: Accepted", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
+    "merge_partial": MetricDef(
+        label="Merge: Partial", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
+    "merge_no": MetricDef(
+        label="Merge: Not Accepted", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
 }

@@ -616,9 +616,72 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         metric_results["merge_acceptance_rate"] = [(f"{author_arg} ({mar_model})", mar_buckets)]
         all_buckets.update(mar_buckets.keys())
 
+    # ── feedback absolute counts: feedback_yes, feedback_no, feedback_unclear ──
+    _fb_abs = {"feedback_yes", "feedback_no", "feedback_unclear"}
+    if _fb_abs & set(requested_metrics):
+        if not author_arg:
+            log.error("--author is required for feedback_* count metrics")
+            sys.exit(1)
+        fb_abs_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
+        conn_fba = open_db(db_path)
+        fba_rows = conn_fba.execute("""
+            SELECT ca.verdict, pr.closed_date
+            FROM comment_analysis ca
+            JOIN pr_comments c ON c.id = ca.comment_id
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND ca.judge_model = ? AND pr.closed_date IS NOT NULL
+        """, (author_arg, fb_abs_model)).fetchall()
+        conn_fba.close()
+
+        from collections import defaultdict as _dd3
+        fb_counts: dict[str, dict[str, int]] = {"yes": _dd3(int), "no": _dd3(int), "unclear": _dd3(int)}
+        for r in fba_rows:
+            v = r["verdict"]
+            if v in fb_counts:
+                fb_counts[v][bucket_key(r["closed_date"], period)] += 1
+        label = f"{author_arg} ({fb_abs_model})"
+        for mname, verdict_key in [("feedback_yes", "yes"), ("feedback_no", "no"), ("feedback_unclear", "unclear")]:
+            if mname in requested_metrics:
+                metric_results[mname] = [(label, dict(fb_counts[verdict_key]))]
+                all_buckets.update(fb_counts[verdict_key].keys())
+
+    # ── merge absolute counts: merge_yes, merge_partial, merge_no ────────────
+    _mr_abs = {"merge_yes", "merge_partial", "merge_no"}
+    if _mr_abs & set(requested_metrics):
+        if not author_arg:
+            log.error("--author is required for merge_* count metrics")
+            sys.exit(1)
+        mr_abs_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
+        conn_mra = open_db(db_path)
+        mra_rows = conn_mra.execute("""
+            SELECT ma.verdict, pr.closed_date
+            FROM merge_analysis ma
+            JOIN pr_comments c ON c.id = ma.comment_id
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND ma.judge_model = ? AND pr.closed_date IS NOT NULL
+              AND ma.analyzed_at = (
+                  SELECT MAX(ma2.analyzed_at) FROM merge_analysis ma2
+                  WHERE ma2.comment_id = ma.comment_id AND ma2.judge_model = ma.judge_model
+              )
+        """, (author_arg, mr_abs_model)).fetchall()
+        conn_mra.close()
+
+        from collections import defaultdict as _dd4
+        mr_counts: dict[str, dict[str, int]] = {"YES": _dd4(int), "PARTIAL": _dd4(int), "NO": _dd4(int)}
+        for r in mra_rows:
+            v = r["verdict"]
+            if v in mr_counts:
+                mr_counts[v][bucket_key(r["closed_date"], period)] += 1
+        label = f"{author_arg} ({mr_abs_model})"
+        for mname, verdict_key in [("merge_yes", "YES"), ("merge_partial", "PARTIAL"), ("merge_no", "NO")]:
+            if mname in requested_metrics:
+                metric_results[mname] = [(label, dict(mr_counts[verdict_key]))]
+                all_buckets.update(mr_counts[verdict_key].keys())
+
+    _special = {"feedback_acceptance_rate", "feedback_acceptance_rate_all",
+                "feedback_rate", "merge_acceptance_rate"} | _fb_abs | _mr_abs
     for metric_name in requested_metrics:
-        if metric_name in ("feedback_acceptance_rate", "feedback_acceptance_rate_all",
-                           "feedback_rate", "merge_acceptance_rate"):
+        if metric_name in _special:
             continue  # already handled above
         mdef = METRICS[metric_name]
         series_data = []
