@@ -616,6 +616,28 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         metric_results["merge_acceptance_rate"] = [(f"{author_arg} ({mar_model})", mar_buckets)]
         all_buckets.update(mar_buckets.keys())
 
+    # ── agent_inline_comments: root comments with file_path per period ─────────
+    if "agent_inline_comments" in requested_metrics:
+        if not author_arg:
+            log.error("--author is required for agent_inline_comments metric")
+            sys.exit(1)
+        conn_aic = open_db(db_path)
+        aic_rows = conn_aic.execute("""
+            SELECT pr.closed_date, COUNT(*) AS cnt
+            FROM pr_comments c
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND c.parent_id IS NULL AND c.file_path IS NOT NULL
+              AND pr.closed_date IS NOT NULL
+            GROUP BY pr.closed_date
+        """, (author_arg,)).fetchall()
+        conn_aic.close()
+        from collections import defaultdict as _dd_aic
+        aic_bk: dict[str, int] = _dd_aic(int)
+        for r in aic_rows:
+            aic_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
+        metric_results["agent_inline_comments"] = [(author_arg, dict(aic_bk))]
+        all_buckets.update(aic_bk.keys())
+
     # ── feedback absolute counts: feedback_yes, feedback_no, feedback_unclear ──
     _fb_abs = {"feedback_yes", "feedback_no", "feedback_unclear"}
     if _fb_abs & set(requested_metrics):
@@ -686,7 +708,8 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 all_buckets.update(data.keys())
 
     _special = {"feedback_acceptance_rate", "feedback_acceptance_rate_all",
-                "feedback_rate", "merge_acceptance_rate"} | _fb_abs | _mr_abs
+                "feedback_rate", "merge_acceptance_rate",
+                "agent_inline_comments"} | _fb_abs | _mr_abs
     for metric_name in requested_metrics:
         if metric_name in _special:
             continue  # already handled above

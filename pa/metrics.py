@@ -161,6 +161,10 @@ METRICS: dict[str, MetricDef] = {
             else None
         ),
     ),
+    "agent_inline_comments": MetricDef(
+        label="Agent Inline Comments", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
     "feedback_rate": MetricDef(
         label="Feedback Rate", unit="%", plot_kind="line",
         # compute=None — fetched separately in cmd_plot (requires --author)
