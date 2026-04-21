@@ -421,11 +421,22 @@ judge:
    ```
    Endpoint работает для любого состояния PR (OPEN, MERGED, DECLINED) — Bitbucket хранит diff между source и target branch на момент последнего обновления PR.
 
-2. **Конвертировать** Bitbucket JSON diff → unified diff формат (± строки с контекстом).
+2. **Скачать исходный код вокруг якоря** (±10 строк) из source-ветки PR:
+   ```
+   GET /rest/api/1.0/projects/{proj}/repos/{repo}/browse/{file_path}?at={toHash}&start={line-10}&limit=21
+   ```
+   `toHash` — SHA коммита source-ветки из ответа diff endpoint. **Работает для смержённых PR с удалёнными ветками** — коммит доступен через merge commit, т.к. это SHA, а не имя ветки.
 
-3. **Отправить LLM-судье** промпт с текстом комментария и diff'ом файла. Судья определяет, было ли замечание учтено в итоговых изменениях.
+3. **Конвертировать** Bitbucket JSON diff → unified diff формат с номерами строк (`-old +new`).
 
-4. **Сохранить вердикт** в таблицу `merge_analysis`.
+4. **Отправить LLM-судье** промпт с тремя входами:
+   - Текст комментария с номером строки якоря
+   - Исходный код вокруг якоря (маркер `>>>` на строке) — чтобы судья видел что критикуется
+   - Итоговый diff файла с номерами строк — чтобы судья видел что изменилось
+
+   Это позволяет корректно определять кейсы типа "удалите этот код" — судья видит код в якоре и его отсутствие в итоговом diff.
+
+5. **Сохранить вердикт** в таблицу `merge_analysis` с `analyzer_version`.
 
 **Вердикты:**
 
@@ -440,6 +451,36 @@ judge:
 merge_acceptance_rate = (count(YES) + 0.5 × count(PARTIAL)) / (count(YES) + count(PARTIAL) + count(NO)) × 100%
 ```
 
+При построении графика для каждого комментария берётся **только последний** результат по `analyzed_at` — т.е. результат самой свежей версии анализатора.
+
+#### Версионирование анализатора
+
+Каждый результат в `merge_analysis` хранится с `analyzer_version` — sha256 от промпт-шаблона (первые 8 символов). При изменении промпта автоматически создаётся новая версия.
+
+**Поведение:**
+
+| Сценарий | Что происходит |
+|---|---|
+| Повторный запуск с тем же промптом | Пропускает уже проанализированные (идемпотентно) |
+| Изменение промпта | Новая `analyzer_version` → все комментарии анализируются заново |
+| Запуск на другом компе с обновлённым промптом | Новые результаты сохраняются рядом со старыми |
+| Построение графика | Берётся последняя версия по `analyzed_at` для каждого комментария |
+
+PRIMARY KEY: `(comment_id, judge_model, analyzer_version)` — старые результаты не удаляются, лежат рядом.
+
+```bash
+# Посмотреть все версии и их результаты
+.venv/bin/python pr_analytics.py sql --query "
+  SELECT analyzer_version, COUNT(*) AS n,
+         SUM(CASE WHEN verdict='YES' THEN 1 ELSE 0 END) AS yes_count,
+         SUM(CASE WHEN verdict='NO' THEN 1 ELSE 0 END) AS no_count,
+         datetime(MAX(analyzed_at)/1000, 'unixepoch') AS last_run
+  FROM merge_analysis
+  GROUP BY analyzer_version
+  ORDER BY MAX(analyzed_at) DESC
+"
+```
+
 **Что анализируется / не анализируется:**
 - Только комментарии с `file_path` (inline-комментарии к файлу) — general-комментарии пропускаются
 - Комментарии без diff (файл не менялся в PR, удалён, переименован) → `SKIP`, не учитываются в метрике
@@ -447,13 +488,11 @@ merge_acceptance_rate = (count(YES) + 0.5 × count(PARTIAL)) / (count(YES) + cou
 
 **Отличие от `semantic_acceptance_rate`:**
 - `semantic_acceptance_rate` — судья оценивает по фидбеку (реакции, ответы в треде): "разработчик согласился?"
-- `merge_acceptance_rate` — судья оценивает по итоговому diff: "код реально был изменён в соответствии с замечанием?"
+- `merge_acceptance_rate` — судья оценивает по итоговому diff + исходному коду якоря: "код реально был изменён в соответствии с замечанием?"
 
 Второй сигнал объективнее — не зависит от того, ответил ли разработчик. Но работает только для inline-комментариев к файлам.
 
-**Стоимость:** 1 Bitbucket API-вызов + 1 LLM-вызов на комментарий. Диффы одного файла в одном PR кешируются в памяти — несколько комментариев к одному файлу = 1 запрос к Bitbucket.
-
-Идемпотентен — повторный запуск пропускает уже проанализированные (same `comment_id + judge_model`). После анализа метрика `merge_acceptance_rate` доступна в `plot --metrics`.
+**Стоимость:** 2 Bitbucket API-вызова (diff + browse) + 1 LLM-вызов на комментарий. Диффы и фрагменты кешируются в памяти per-(repo, pr, file).
 
 ---
 
@@ -739,8 +778,9 @@ bitbucket_cache.db
 │                          reasoning, analyzed_at
 ├── comment_classification comment_id, classifier_model, comment_type,
 │                          depth, confidence, classified_at
-├── merge_analysis         comment_id, judge_model, verdict (YES/PARTIAL/NO),
-│                          confidence, reasoning, analyzed_at
+├── merge_analysis         comment_id, judge_model, analyzer_version,
+│                          verdict (YES/PARTIAL/NO), confidence, reasoning,
+│                          analyzed_at
 ├── pr_diff_stats          repo_id, pr_id, lines_added, lines_deleted,
 │                          files_changed, test_config_ratio, fetched_at
 └── pr_scores              repo_id, pr_id, scorer_model, diversity_score,
@@ -753,6 +793,6 @@ bitbucket_cache.db
 
 `comment_analysis.verdict` — `yes` / `no` / `unclear` (PRIMARY KEY: `comment_id + judge_model`).
 
-`merge_analysis.verdict` — `YES` / `PARTIAL` / `NO` (PRIMARY KEY: `comment_id + judge_model`).
+`merge_analysis.verdict` — `YES` / `PARTIAL` / `NO` (PRIMARY KEY: `comment_id + judge_model + analyzer_version`). `analyzer_version` = sha256 промпт-шаблона (8 символов).
 
 `pr_scores.verdict` — `GOLD` / `SILVER` / `REJECT` (PRIMARY KEY: `repo_id + pr_id + scorer_model`).

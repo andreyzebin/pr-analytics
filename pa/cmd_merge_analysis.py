@@ -10,6 +10,7 @@ Results stored in merge_analysis table. Idempotent — skips already analyzed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import sys
 import time
@@ -190,6 +191,10 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             sys.exit(4)
 
     # ── find unanalyzed comments with file anchors ─────────────────────────
+    # Compute analyzer_version early so we can use it in the query
+    prompt_content = _PROMPT_PATH.read_text(encoding="utf-8")
+    analyzer_version = hashlib.sha256(prompt_content.encode()).hexdigest()[:8]
+
     q = """
         SELECT
             c.id          AS comment_id,
@@ -213,9 +218,10 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
           AND NOT EXISTS (
               SELECT 1 FROM merge_analysis ma
               WHERE ma.comment_id = c.id AND ma.judge_model = ?
+                AND ma.analyzer_version = ?
           )
     """
-    params: list = [author, judge_model]
+    params: list = [author, judge_model, analyzer_version]
 
     if since_ts:
         q += " AND pr.created_date >= ?"
@@ -241,7 +247,7 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
 
     print(
         f"Found {total} file-anchored comment(s) for author={author!r}\n"
-        f"Judge model: {judge_model}\n"
+        f"Judge model: {judge_model}  analyzer_version: {analyzer_version}\n"
         f"{'DRY RUN — no API calls will be made' if dry_run else ''}"
     )
 
@@ -257,7 +263,7 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
         return
 
     # ── run ─────────────────────────────────────────────────────────────────
-    prompt_template = _PROMPT_PATH.read_text(encoding="utf-8")
+    prompt_template = prompt_content  # already loaded above for version hash
     from pa.config import resolve_judge_tool_choice
     tool_choice = resolve_judge_tool_choice(cfg)
     judge = LLMJudge(model=judge_model, api_key=api_key, base_url=base_url, tool_choice=tool_choice)
@@ -331,9 +337,9 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
 
             conn.execute(
                 """INSERT OR REPLACE INTO merge_analysis
-                   (comment_id, judge_model, verdict, confidence, reasoning, analyzed_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (comment_id, judge_model, verdict, confidence, reasoning, now_ms),
+                   (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, analyzed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, now_ms),
             )
             conn.commit()
 

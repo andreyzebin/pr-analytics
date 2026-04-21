@@ -583,6 +583,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             sys.exit(1)
         mar_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
         conn_mar = open_db(db_path)
+        # Pick only the latest analyzer_version per (comment_id, judge_model)
         mar_rows = conn_mar.execute("""
             SELECT ma.verdict, pr.closed_date
             FROM merge_analysis ma
@@ -591,6 +592,10 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             WHERE c.author = ? AND ma.judge_model = ?
               AND pr.closed_date IS NOT NULL
               AND ma.verdict IN ('YES','PARTIAL','NO')
+              AND ma.analyzed_at = (
+                  SELECT MAX(ma2.analyzed_at) FROM merge_analysis ma2
+                  WHERE ma2.comment_id = ma.comment_id AND ma2.judge_model = ma.judge_model
+              )
         """, (author_arg, mar_model)).fetchall()
         conn_mar.close()
 
