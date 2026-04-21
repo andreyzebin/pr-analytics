@@ -1,9 +1,10 @@
 """
-LLM judge client for analyze-feedback command.
+LLM judge client for analyze-feedback and other LLM-based commands.
 
 Supports:
   - Anthropic Claude (default, via ANTHROPIC_API_KEY)
   - Any OpenAI-compatible endpoint (set base_url in config)
+  - tool_choice: "auto" — uses function calling for structured JSON output
 """
 from __future__ import annotations
 
@@ -27,22 +28,66 @@ class JudgeVerdict:
     tokens_used: int = 0  # total tokens consumed by this call
 
 
+# ── Tool schemas for function calling ─────────────────────────────────────
+
+_VERDICT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_verdict",
+        "description": "Submit the judge verdict for a code review comment",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": ["yes", "no", "unclear"]},
+                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                "reasoning": {"type": "string", "description": "One-sentence explanation"},
+            },
+            "required": ["verdict", "confidence", "reasoning"],
+        },
+    },
+}
+
+_GENERIC_JSON_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "submit_result",
+        "description": "Submit the structured analysis result",
+        "parameters": {
+            "type": "object",
+            "properties": {},  # Accept any JSON
+            "additionalProperties": True,
+        },
+    },
+}
+
+
 class LLMJudge:
-    def __init__(self, model: str, api_key: str, base_url: str | None = None):
+    def __init__(self, model: str, api_key: str, base_url: str | None = None,
+                 tool_choice: str | None = None):
         self._model = model
         self._api_key = api_key
-        self._base_url = base_url  # None → Anthropic; str → OpenAI-compatible
+        self._base_url = base_url    # None → Anthropic; str → OpenAI-compatible
+        self._tool_choice = tool_choice  # "auto" → use function calling
 
     def judge(self, prompt: str) -> JudgeVerdict:
+        if self._tool_choice == "auto" and self._base_url:
+            data, tokens = self._call_with_tool(prompt, _VERDICT_TOOL)
+            verdict = self._normalize_verdict(data)
+            verdict.tokens_used = tokens
+            return verdict
         raw, tokens = self._call(prompt)
         verdict = self._parse(raw)
         verdict.tokens_used = tokens
         return verdict
 
     def call_json(self, prompt: str) -> tuple[dict, int]:
-        """Generic call: returns (parsed_dict, tokens_used). Use for non-verdict schemas."""
+        """Generic call: returns (parsed_dict, tokens_used)."""
+        if self._tool_choice == "auto" and self._base_url:
+            return self._call_with_tool(prompt, _GENERIC_JSON_TOOL)
         raw, tokens = self._call(prompt)
         return self._parse_json(raw), tokens
+
+    # ── Plain text call ───────────────────────────────────────────────────
 
     def _call(self, prompt: str) -> tuple[str, int]:
         """Returns (response_text, total_tokens_used)."""
@@ -72,6 +117,37 @@ class LLMJudge:
             tokens = (msg.usage.input_tokens + msg.usage.output_tokens) if msg.usage else 0
             return msg.content[0].text, tokens
 
+    # ── Function calling ──────────────────────────────────────────────────
+
+    def _call_with_tool(self, prompt: str, tool: dict) -> tuple[dict, int]:
+        """Call LLM with function calling, return (parsed_args_dict, tokens)."""
+        from openai import OpenAI
+        client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+        is_reasoner = "reasoner" in self._model or "-r1" in self._model.lower()
+        kwargs: dict = dict(
+            model=self._model,
+            messages=[{"role": "user", "content": prompt}],
+            tools=[tool],
+            tool_choice="auto",
+            max_tokens=1024,
+        )
+        if not is_reasoner:
+            kwargs["temperature"] = 0
+        resp = client.chat.completions.create(**kwargs)
+        tokens = resp.usage.total_tokens if resp.usage else 0
+        msg = resp.choices[0].message
+
+        # Model used a tool call → parse arguments
+        if msg.tool_calls:
+            raw_args = msg.tool_calls[0].function.arguments
+            return json.loads(raw_args), tokens
+
+        # Fallback: model responded with plain text (some models ignore tools)
+        content = msg.content or ""
+        return self._parse_json(content), tokens
+
+    # ── Parsing ───────────────────────────────────────────────────────────
+
     @staticmethod
     def _parse_json(raw: str) -> dict:
         """Parse JSON from LLM response, stripping markdown fences."""
@@ -90,8 +166,7 @@ class LLMJudge:
             raise ValueError(f"Cannot parse judge response: {raw[:300]}")
 
     @staticmethod
-    def _parse(raw: str) -> JudgeVerdict:
-        data = LLMJudge._parse_json(raw)
+    def _normalize_verdict(data: dict) -> JudgeVerdict:
         verdict = str(data.get("verdict", "unclear")).lower()
         if verdict not in ("yes", "no", "unclear"):
             verdict = "unclear"
@@ -100,3 +175,8 @@ class LLMJudge:
             confidence = "low"
         reasoning = str(data.get("reasoning", ""))
         return JudgeVerdict(verdict=verdict, confidence=confidence, reasoning=reasoning)
+
+    @staticmethod
+    def _parse(raw: str) -> JudgeVerdict:
+        data = LLMJudge._parse_json(raw)
+        return LLMJudge._normalize_verdict(data)

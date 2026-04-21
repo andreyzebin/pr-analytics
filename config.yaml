@@ -30,6 +30,11 @@ judge:
   # Optional: OpenAI-compatible base URL (leave empty for Anthropic)
   # base_url: "https://api.openai.com/v1"
 
+  # tool_choice: "auto" — use function calling for structured JSON output
+  # More reliable than parsing text, but not all models support it.
+  # Leave empty or omit for plain text mode (default).
+  # tool_choice: "auto"
+
 golden:
   # Heuristic filter defaults for select-golden command
   min_lifetime_h: 0.25    # 15 minutes

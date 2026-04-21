@@ -172,7 +172,9 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
 
     # ── run ─────────────────────────────────────────────────────────────────
     prompt_template = _PROMPT_PATH.read_text(encoding="utf-8")
-    judge = LLMJudge(model=judge_model, api_key=api_key, base_url=base_url)
+    from pa.config import resolve_judge_tool_choice
+    tool_choice = resolve_judge_tool_choice(cfg)
+    judge = LLMJudge(model=judge_model, api_key=api_key, base_url=base_url, tool_choice=tool_choice)
     session = make_session(token, cfg)
 
     now_ms = int(time.time() * 1000)

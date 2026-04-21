@@ -123,3 +123,7 @@ def resolve_judge_api_key(cfg: dict) -> Optional[str]:
 
 def resolve_judge_base_url(cfg: dict) -> Optional[str]:
     return _judge_cfg(cfg).get("base_url") or None
+
+
+def resolve_judge_tool_choice(cfg: dict) -> Optional[str]:
+    return _judge_cfg(cfg).get("tool_choice") or None
