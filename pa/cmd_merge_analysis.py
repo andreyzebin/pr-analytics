@@ -35,8 +35,8 @@ def _bb_diff_to_text(data: dict) -> str:
     """Convert Bitbucket Server diff JSON to unified diff text."""
     lines = []
     for diff in data.get("diffs", []):
-        src = diff.get("source", {}).get("toString", "")
-        dst = diff.get("destination", {}).get("toString", "")
+        src = (diff.get("source") or {}).get("toString", "/dev/null")
+        dst = (diff.get("destination") or {}).get("toString", "/dev/null")
         lines.append(f"--- {src}")
         lines.append(f"+++ {dst}")
         for hunk in diff.get("hunks", []):
