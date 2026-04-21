@@ -14,9 +14,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from urllib.parse import quote
-
-from pa.api import api_get_text, make_session
+from pa.api import api_get, make_session
 from pa.config import (
     resolve_db, resolve_judge_api_key, resolve_judge_base_url,
     resolve_judge_model, resolve_token, resolve_url,
@@ -33,6 +31,27 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / "judge_merge_acceptance.txt"
 _diff_cache: dict[tuple, str | None] = {}
 
 
+def _bb_diff_to_text(data: dict) -> str:
+    """Convert Bitbucket Server diff JSON to unified diff text."""
+    lines = []
+    for diff in data.get("diffs", []):
+        src = diff.get("source", {}).get("toString", "")
+        dst = diff.get("destination", {}).get("toString", "")
+        lines.append(f"--- {src}")
+        lines.append(f"+++ {dst}")
+        for hunk in diff.get("hunks", []):
+            sh = hunk.get("sourceLine", 0)
+            ss = hunk.get("sourceSpan", 0)
+            dh = hunk.get("destinationLine", 0)
+            ds = hunk.get("destinationSpan", 0)
+            lines.append(f"@@ -{sh},{ss} +{dh},{ds} @@")
+            for seg in hunk.get("segments", []):
+                prefix = {"CONTEXT": " ", "ADDED": "+", "REMOVED": "-"}.get(seg["type"], " ")
+                for line in seg.get("lines", []):
+                    lines.append(f"{prefix}{line['line']}")
+    return "\n".join(lines)
+
+
 def _fetch_diff(
     session, bb_url: str,
     project_key: str, repo_slug: str, pr_id: int,
@@ -43,14 +62,21 @@ def _fetch_diff(
     key = (repo_id, pr_id, file_path)
     if key in _diff_cache:
         return _diff_cache[key]
-    encoded_path = quote(file_path, safe="")
+    # Bitbucket Server: path goes unencoded in the URL path segment
     url = (
         f"{bb_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
-        f"/pull-requests/{pr_id}/diff/{encoded_path}?contextLines=5"
+        f"/pull-requests/{pr_id}/diff/{file_path}?contextLines=5"
     )
-    text = api_get_text(session, url)
-    _diff_cache[key] = text
-    return text
+    try:
+        data = api_get(session, url)
+        text = _bb_diff_to_text(data)
+        _diff_cache[key] = text if text.strip() else None
+        return _diff_cache[key]
+    except Exception as exc:
+        log.warning("Failed to fetch diff for %s in %s/%s#%d: %s",
+                    file_path, project_key, repo_slug, pr_id, exc)
+        _diff_cache[key] = None
+        return None
 
 
 def _truncate_diff(diff: str, max_chars: int = 4000) -> str:
