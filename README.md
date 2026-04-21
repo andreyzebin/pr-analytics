@@ -148,6 +148,13 @@ source .env
 | `feedback_acceptance_rate` | линейная | yes/(yes+no) — среди замечаний с фидбеком (LLM-судья, требует `--author`) |
 | `feedback_acceptance_rate_all` | линейная | yes/все_замечания — знаменатель включает замечания без фидбека (LLM-судья, требует `--author`) |
 | `merge_acceptance_rate` | линейная | (YES + 0.5×PARTIAL) / total — комментарии, подтверждённые diff'ом (требует `analyze-merges` + `--author`) |
+| `feedback_yes` | bar | Принятых (yes) по фидбеку за период |
+| `feedback_no` | bar | Отклонённых (no) по фидбеку за период |
+| `feedback_unclear` | bar | Неопределённых (unclear) за период |
+| `merge_yes` | bar | Подтверждённых diff'ом (YES) за период |
+| `merge_partial` | bar | Частично подтверждённых (PARTIAL) за период |
+| `merge_yes_partial` | bar | YES + PARTIAL суммарно за период |
+| `merge_no` | bar | Не подтверждённых diff'ом (NO) за период |
 
 Метрики можно комбинировать через запятую.
 
