@@ -441,6 +441,49 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             commits, comment_ts, row["file_path"],
         )
 
+        # Fast path: no commits after comment → guaranteed NO, skip LLM call
+        after_count = sum(1 for c in commits if c["timestamp"] > comment_ts)
+        if after_count == 0:
+            verdict, confidence, reasoning = "NO", 1.0, "Нет коммитов после комментария"
+            conn.execute(
+                """INSERT OR REPLACE INTO merge_analysis
+                   (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, analyzed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, now_ms),
+            )
+            conn.commit()
+            n_no += 1
+            elapsed = time.monotonic() - start
+            eta = elapsed / i * (total - i)
+            print(
+                f"  [{i}/{total}]  {repo}#{row['pr_id']} {row['file_path']}:{anchor_line}"
+                f"  → NO (1.0) \"no commits after comment\" [skip LLM]"
+                f"  [{int(elapsed)}s, ~{int(eta)}s left  {total_tokens:,}tok]",
+                flush=True,
+            )
+            continue
+
+        # Fast path: commits exist but anchor file not touched → guaranteed NO
+        if not anchor_touched:
+            verdict, confidence, reasoning = "NO", 1.0, f"Файл не менялся после комментария (коммитов: {after_count})"
+            conn.execute(
+                """INSERT OR REPLACE INTO merge_analysis
+                   (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, analyzed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, now_ms),
+            )
+            conn.commit()
+            n_no += 1
+            elapsed = time.monotonic() - start
+            eta = elapsed / i * (total - i)
+            print(
+                f"  [{i}/{total}]  {repo}#{row['pr_id']} {row['file_path']}:{anchor_line}"
+                f"  → NO (1.0) \"file not in post-comment commits\" [skip LLM]"
+                f"  [{int(elapsed)}s, ~{int(eta)}s left  {total_tokens:,}tok]",
+                flush=True,
+            )
+            continue
+
         diff_truncated = _truncate_diff(diff_text, max_diff_chars)
         comment_text = (row["comment_text"] or "")[:max_comment_chars]
 
