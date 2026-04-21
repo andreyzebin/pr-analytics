@@ -646,7 +646,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 all_buckets.update(fb_counts[verdict_key].keys())
 
     # ── merge absolute counts: merge_yes, merge_partial, merge_no ────────────
-    _mr_abs = {"merge_yes", "merge_partial", "merge_no"}
+    _mr_abs = {"merge_yes", "merge_partial", "merge_yes_partial", "merge_no"}
     if _mr_abs & set(requested_metrics):
         if not author_arg:
             log.error("--author is required for merge_* count metrics")
@@ -673,10 +673,17 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             if v in mr_counts:
                 mr_counts[v][bucket_key(r["closed_date"], period)] += 1
         label = f"{author_arg} ({mr_abs_model})"
-        for mname, verdict_key in [("merge_yes", "YES"), ("merge_partial", "PARTIAL"), ("merge_no", "NO")]:
+        # merge_yes_partial = YES + PARTIAL combined
+        from collections import defaultdict as _dd5
+        mr_yes_partial: dict[str, int] = _dd5(int)
+        for bk in set(list(mr_counts["YES"].keys()) + list(mr_counts["PARTIAL"].keys())):
+            mr_yes_partial[bk] = mr_counts["YES"].get(bk, 0) + mr_counts["PARTIAL"].get(bk, 0)
+
+        for mname, data in [("merge_yes", mr_counts["YES"]), ("merge_partial", mr_counts["PARTIAL"]),
+                            ("merge_yes_partial", mr_yes_partial), ("merge_no", mr_counts["NO"])]:
             if mname in requested_metrics:
-                metric_results[mname] = [(label, dict(mr_counts[verdict_key]))]
-                all_buckets.update(mr_counts[verdict_key].keys())
+                metric_results[mname] = [(label, dict(data))]
+                all_buckets.update(data.keys())
 
     _special = {"feedback_acceptance_rate", "feedback_acceptance_rate_all",
                 "feedback_rate", "merge_acceptance_rate"} | _fb_abs | _mr_abs

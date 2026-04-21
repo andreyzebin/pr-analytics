@@ -210,6 +210,10 @@ METRICS: dict[str, MetricDef] = {
         label="Merge: Partial", unit="count", plot_kind="bar",
         compute=None, fmt=lambda v: str(int(v)),
     ),
+    "merge_yes_partial": MetricDef(
+        label="Merge: Accepted+Partial", unit="count", plot_kind="bar",
+        compute=None, fmt=lambda v: str(int(v)),
+    ),
     "merge_no": MetricDef(
         label="Merge: Not Accepted", unit="count", plot_kind="bar",
         compute=None, fmt=lambda v: str(int(v)),
