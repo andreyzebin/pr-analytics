@@ -15,6 +15,13 @@ Environment variables (override config files):
 """
 from __future__ import annotations
 
+# Use OS trust store for SSL (picks up corporate proxy CAs like CheckPoint)
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    pass
+
 import argparse
 import logging
 import sys
