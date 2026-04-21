@@ -35,6 +35,8 @@ from pa.cmd_analyze import cmd_analyze_feedback
 from pa.cmd_merge_analysis import cmd_merge_analysis
 from pa.cmd_select_golden import cmd_select_golden
 from pa.cmd_cache import cmd_cache
+from pa.cmd_find_prs import cmd_find_prs
+from pa.cmd_find_comments import cmd_find_comments
 from pa.cmd_feedback import cmd_review_feedback
 from pa.cmd_find_repos import cmd_find_repos
 from pa.cmd_plot import cmd_plot
@@ -169,6 +171,44 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", help="Output file path")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
+    # ── find-prs ───────────────────────────────────────────────────────────────
+    p = sub.add_parser("find-prs", help="List PRs matching filters")
+    p.add_argument("--repos", help="Comma-separated PROJ/repo entries")
+    p.add_argument("--projects", help="Comma-separated project keys")
+    p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
+    p.add_argument("--author", help="PR author slug")
+    p.add_argument("--reviewer", help="Reviewer slug (in formal reviewers list)")
+    p.add_argument("--commenter", help="Commenter slug (left at least one comment)")
+    p.add_argument("--since", help="Start date (YYYY-MM-DD)")
+    p.add_argument("--until", help="End date (YYYY-MM-DD)")
+    p.add_argument("--state", choices=["MERGED", "DECLINED", "OPEN"])
+    p.add_argument("--limit", type=int, default=1000, help="Row limit (0 = unlimited, default: 1000)")
+    p.add_argument("--output", help="Output file path")
+    p.add_argument("--format", default="table", choices=["table", "csv", "json"])
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
+    # ── find-comments ─────────────────────────────────────────────────────────
+    p = sub.add_parser("find-comments", help="List comments matching filters")
+    p.add_argument("--repos", help="Comma-separated PROJ/repo entries")
+    p.add_argument("--projects", help="Comma-separated project keys")
+    p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
+    p.add_argument("--author", help="Comment author slug")
+    p.add_argument("--pr-author", dest="pr_author", help="PR author slug")
+    p.add_argument("--since", help="Start date (YYYY-MM-DD)")
+    p.add_argument("--until", help="End date (YYYY-MM-DD)")
+    p.add_argument("--state", choices=["MERGED", "DECLINED", "OPEN"],
+                   help="Filter by PR state")
+    p.add_argument("--severity", choices=["NORMAL", "BLOCKER"],
+                   help="Filter by comment severity")
+    p.add_argument("--file-only", action="store_true", dest="file_only",
+                   help="Only inline comments (with file_path)")
+    p.add_argument("--include-replies", action="store_true", dest="include_replies",
+                   help="Include reply comments (default: root only)")
+    p.add_argument("--limit", type=int, default=1000, help="Row limit (0 = unlimited, default: 1000)")
+    p.add_argument("--output", help="Output file path")
+    p.add_argument("--format", default="table", choices=["table", "csv", "json"])
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
     # ── sql ────────────────────────────────────────────────────────────────────
     p = sub.add_parser("sql", help="Run arbitrary SELECT query")
     p.add_argument("--query", help="SQL SELECT query string")
@@ -253,6 +293,8 @@ def main() -> None:
         "analyze-feedback": cmd_analyze_feedback,
         "select-golden": cmd_select_golden,
         "find-repos": cmd_find_repos,
+        "find-prs": cmd_find_prs,
+        "find-comments": cmd_find_comments,
         "sql": cmd_sql,
         "status": cmd_status,
         "review-feedback": cmd_review_feedback,
