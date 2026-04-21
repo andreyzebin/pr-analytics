@@ -122,6 +122,18 @@ CREATE TABLE IF NOT EXISTS pr_scores (
     FOREIGN KEY (repo_id, pr_id) REFERENCES pull_requests(repo_id, pr_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pr_scores_total ON pr_scores(total_score DESC);
+
+CREATE TABLE IF NOT EXISTS merge_analysis (
+    comment_id   INTEGER NOT NULL,
+    judge_model  TEXT    NOT NULL,
+    verdict      TEXT    NOT NULL CHECK(verdict IN ('YES','PARTIAL','NO')),
+    confidence   REAL,
+    reasoning    TEXT,
+    analyzed_at  INTEGER NOT NULL,
+    PRIMARY KEY (comment_id, judge_model),
+    FOREIGN KEY (comment_id) REFERENCES pr_comments(id)
+);
+CREATE INDEX IF NOT EXISTS idx_merge_analysis_comment ON merge_analysis(comment_id);
 """
 
 
@@ -195,6 +207,7 @@ def delete_pr_comments(conn: sqlite3.Connection, repo_id: int, pr_id: int) -> No
         conn.execute(f"DELETE FROM comment_reactions WHERE comment_id IN ({placeholders})", comment_ids)
         conn.execute(f"DELETE FROM comment_analysis WHERE comment_id IN ({placeholders})", comment_ids)
         conn.execute(f"DELETE FROM comment_classification WHERE comment_id IN ({placeholders})", comment_ids)
+        conn.execute(f"DELETE FROM merge_analysis WHERE comment_id IN ({placeholders})", comment_ids)
     conn.execute("DELETE FROM pr_comments WHERE repo_id=? AND pr_id=?", (repo_id, pr_id))
 
 

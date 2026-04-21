@@ -21,6 +21,7 @@ import sys
 
 from pa.cmd_acceptance import cmd_acceptance
 from pa.cmd_analyze import cmd_analyze_feedback
+from pa.cmd_merge_analysis import cmd_merge_analysis
 from pa.cmd_select_golden import cmd_select_golden
 from pa.cmd_cache import cmd_cache
 from pa.cmd_feedback import cmd_review_feedback
@@ -184,6 +185,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", default="table", choices=["table", "csv", "json"])
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
+    # ── analyze-merges ──────────────────────────────────────────────────────
+    p = sub.add_parser("analyze-merges",
+                       help="Check if agent comments led to actual code changes via PR diffs")
+    p.add_argument("--author", required=True, help="AI agent slug whose comments to analyze")
+    p.add_argument("--since", help="Start date (YYYY-MM-DD)")
+    p.add_argument("--until", help="End date (YYYY-MM-DD)")
+    p.add_argument("--repos", help="Comma-separated PROJ/repo entries")
+    p.add_argument("--projects", help="Comma-separated project keys")
+    p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
+    p.add_argument("--judge-model", default=None, dest="judge_model",
+                   help=f"LLM judge model (default: {DEFAULT_JUDGE_MODEL})")
+    p.add_argument("--batch-size", type=int, default=50, dest="batch_size",
+                   help="Max comments per run (default: 50, 0 = unlimited)")
+    p.add_argument("--budget-tokens", type=int, default=None, dest="budget_tokens",
+                   help="Token budget (default: unlimited)")
+    p.add_argument("--max-comment-chars", type=int, default=2000, dest="max_comment_chars")
+    p.add_argument("--max-diff-chars", type=int, default=4000, dest="max_diff_chars",
+                   help="Truncate file diff to this length (default: 4000)")
+    p.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
     # ── acceptance ──────────────────────────────────────────────────────────
     p = sub.add_parser("acceptance",
                        help="Acceptance metrics by diffgraph prompt hash")
@@ -217,6 +239,7 @@ def main() -> None:
         "sql": cmd_sql,
         "status": cmd_status,
         "review-feedback": cmd_review_feedback,
+        "analyze-merges": cmd_merge_analysis,
         "acceptance": cmd_acceptance,
     }
 

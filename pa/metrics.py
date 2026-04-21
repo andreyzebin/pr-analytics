@@ -182,4 +182,11 @@ METRICS: dict[str, MetricDef] = {
         compute=None,
         fmt=lambda v: f"{v:.0f}%",
     ),
+    "merge_acceptance_rate": MetricDef(
+        label="Merge Acceptance Rate", unit="%", plot_kind="line",
+        # compute=None — fetched from merge_analysis (requires --author + --judge-model)
+        # (YES + 0.5*PARTIAL) / (YES + PARTIAL + NO) × 100%
+        compute=None,
+        fmt=lambda v: f"{v:.0f}%",
+    ),
 }

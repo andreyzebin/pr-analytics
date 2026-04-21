@@ -576,8 +576,44 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         metric_results["feedback_rate"] = [(author_arg, fr_buckets)]
         all_buckets.update(fr_buckets.keys())
 
+    # ── merge_acceptance_rate: (YES + 0.5*PARTIAL) / (YES+PARTIAL+NO) per period
+    if "merge_acceptance_rate" in requested_metrics:
+        if not author_arg:
+            log.error("--author is required for merge_acceptance_rate metric")
+            sys.exit(1)
+        mar_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
+        conn_mar = open_db(db_path)
+        mar_rows = conn_mar.execute("""
+            SELECT ma.verdict, pr.closed_date
+            FROM merge_analysis ma
+            JOIN pr_comments c ON c.id = ma.comment_id
+            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+            WHERE c.author = ? AND ma.judge_model = ?
+              AND pr.closed_date IS NOT NULL
+              AND ma.verdict IN ('YES','PARTIAL','NO')
+        """, (author_arg, mar_model)).fetchall()
+        conn_mar.close()
+
+        from collections import defaultdict as _dd2
+        mar_yes: dict[str, float] = _dd2(float)
+        mar_total: dict[str, int] = _dd2(int)
+        for r in mar_rows:
+            bk = bucket_key(r["closed_date"], period)
+            mar_total[bk] += 1
+            if r["verdict"] == "YES":
+                mar_yes[bk] += 1.0
+            elif r["verdict"] == "PARTIAL":
+                mar_yes[bk] += 0.5
+        mar_buckets = {
+            bk: mar_yes.get(bk, 0) / t * 100
+            for bk, t in mar_total.items() if t > 0
+        }
+        metric_results["merge_acceptance_rate"] = [(f"{author_arg} ({mar_model})", mar_buckets)]
+        all_buckets.update(mar_buckets.keys())
+
     for metric_name in requested_metrics:
-        if metric_name in ("semantic_acceptance_rate", "semantic_acceptance_rate_all", "feedback_rate"):
+        if metric_name in ("semantic_acceptance_rate", "semantic_acceptance_rate_all",
+                           "feedback_rate", "merge_acceptance_rate"):
             continue  # already handled above
         mdef = METRICS[metric_name]
         series_data = []

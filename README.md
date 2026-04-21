@@ -145,12 +145,14 @@ source .env
 | `feedback_rate` | линейная | % замечаний агента, на которые отреагировали (реакция или ответ), требует `--author` |
 | `semantic_acceptance_rate` | линейная | yes/(yes+no) — среди замечаний с фидбеком (LLM-судья, требует `--author`) |
 | `semantic_acceptance_rate_all` | линейная | yes/все_замечания — знаменатель включает замечания без фидбека (LLM-судья, требует `--author`) |
+| `merge_acceptance_rate` | линейная | (YES + 0.5×PARTIAL) / total — комментарии, подтверждённые diff'ом (требует `analyze-merges` + `--author`) |
 
 Метрики можно комбинировать через запятую.
 
-Четыре метрики дают полную воронку эффективности AI-агента:
+Воронка эффективности AI-агента:
 ```
-agent_comments → feedback_rate → semantic_acceptance_rate
+agent_comments → feedback_rate → semantic_acceptance_rate     (по фидбеку)
+                               → merge_acceptance_rate        (по diff — реальные изменения в коде)
                                  semantic_acceptance_rate_all  (реальное влияние на весь поток)
 ```
 
@@ -164,6 +166,7 @@ agent_comments → feedback_rate → semantic_acceptance_rate
 - `feedback_rate` = `comments_with_reactions_or_replies / total_comments × 100`
 - `semantic_acceptance_rate` = `yes / (yes + no) × 100` — только комментарии с фидбеком
 - `semantic_acceptance_rate_all` = `yes / total_comments × 100` — все комментарии в знаменателе
+- `merge_acceptance_rate` = `(YES + 0.5×PARTIAL) / (YES + PARTIAL + NO) × 100` — по итоговому diff файла
 
 Все trend-метрики группируются по `closed_date` в периоды (week: `%G-W%V`, month: `%Y-%m`).
 
@@ -376,6 +379,41 @@ judge:
   --author ai-review-bot \
   --layout stack --output output/semantic.html
 ```
+
+---
+
+### `analyze-merges` — проверка влияния комментариев на код через diff
+
+Для каждого комментария AI-агента с привязкой к файлу (`file_path != NULL`) скачивает итоговый diff этого файла из Bitbucket PR и спрашивает LLM-судью, было ли замечание учтено в изменениях.
+
+```bash
+# Проанализировать комментарии с file anchors
+.venv/bin/python pr_analytics.py analyze-merges \
+  --author ai-review-bot \
+  --since 2026-01-01 \
+  --batch-size 100 --budget-tokens 200000
+
+# Посмотреть что будет обработано (без API-вызовов)
+.venv/bin/python pr_analytics.py analyze-merges \
+  --author ai-review-bot --dry-run
+```
+
+| Параметр | Описание |
+|---|---|
+| `--author` | Slug AI-агента (обязательный) |
+| `--since` / `--until` | Диапазон по дате создания PR |
+| `--repos` / `--projects` / `--repos-file` | Фильтр по репозиториям |
+| `--judge-model` | LLM-модель судьи |
+| `--batch-size` | Макс. комментариев за запуск (default: 50) |
+| `--budget-tokens` | Лимит токенов |
+| `--max-diff-chars` | Обрезка diff до N символов (default: 4000) |
+| `--dry-run` | Показать список без вызова API |
+
+**Вердикты:** `YES` (исправление в diff), `PARTIAL` (частично), `NO` (не связано). Результаты в таблице `merge_analysis`.
+
+**API-вызовы:** 1 Bitbucket (diff файла) + 1 LLM на комментарий. Диффы одного файла кешируются — несколько комментариев к одному файлу = 1 запрос.
+
+Идемпотентен — повторный запуск пропускает уже проанализированные. После анализа метрика `merge_acceptance_rate` доступна в `plot --metrics`.
 
 ---
 
@@ -661,6 +699,8 @@ bitbucket_cache.db
 │                          reasoning, analyzed_at
 ├── comment_classification comment_id, classifier_model, comment_type,
 │                          depth, confidence, classified_at
+├── merge_analysis         comment_id, judge_model, verdict (YES/PARTIAL/NO),
+│                          confidence, reasoning, analyzed_at
 ├── pr_diff_stats          repo_id, pr_id, lines_added, lines_deleted,
 │                          files_changed, test_config_ratio, fetched_at
 └── pr_scores              repo_id, pr_id, scorer_model, diversity_score,
@@ -672,5 +712,7 @@ bitbucket_cache.db
 `reviewers` — JSON-массив slug'ов, доступен через `json_each()` в SQL-запросах.
 
 `comment_analysis.verdict` — `yes` / `no` / `unclear` (PRIMARY KEY: `comment_id + judge_model`).
+
+`merge_analysis.verdict` — `YES` / `PARTIAL` / `NO` (PRIMARY KEY: `comment_id + judge_model`).
 
 `pr_scores.verdict` — `GOLD` / `SILVER` / `REJECT` (PRIMARY KEY: `repo_id + pr_id + scorer_model`).

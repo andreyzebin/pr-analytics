@@ -68,6 +68,40 @@ def api_get(session: requests.Session, url: str) -> dict:
     raise RuntimeError(f"Failed after {MAX_RETRIES} attempts: {url}")
 
 
+def api_get_text(session: requests.Session, url: str) -> str | None:
+    """GET request returning raw text (for diffs). Returns None on 404."""
+    log.debug("GET (text) %s", url)
+    for attempt in range(MAX_RETRIES):
+        try:
+            resp = session.get(url, timeout=REQUEST_TIMEOUT,
+                               headers={"Accept": "text/plain"})
+            if resp.status_code == 404:
+                return None
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get("Retry-After", 5))
+                log.warning("Rate limited, waiting %ds", retry_after)
+                time.sleep(retry_after)
+                continue
+            if resp.status_code in (401, 403):
+                log.error("Authentication error %d: %s", resp.status_code, url)
+                sys.exit(2)
+            resp.raise_for_status()
+            return resp.text
+        except requests.exceptions.Timeout:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)
+            else:
+                log.error("Timeout after %d retries: %s", MAX_RETRIES, url)
+                return None
+        except requests.exceptions.ConnectionError as e:
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)
+            else:
+                log.error("Connection failed: %s", e)
+                return None
+    return None
+
+
 def paginate(session: requests.Session, url: str, limit: int = 25) -> list:
     results = []
     start = 0
