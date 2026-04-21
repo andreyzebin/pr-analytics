@@ -27,7 +27,7 @@ def make_session(token: str, cfg: dict) -> requests.Session:
     return session
 
 
-def api_get(session: requests.Session, url: str) -> dict:
+def api_get(session: requests.Session, url: str, allow_404: bool = False) -> dict | None:
     log.debug("GET %s", url)
     t0 = time.monotonic()
     for attempt in range(MAX_RETRIES):
@@ -44,6 +44,9 @@ def api_get(session: requests.Session, url: str) -> dict:
             if resp.status_code in (401, 403):
                 log.error("Authentication error %d: %s", resp.status_code, url)
                 sys.exit(2)
+
+            if allow_404 and resp.status_code == 404:
+                return None
 
             resp.raise_for_status()
             return resp.json()

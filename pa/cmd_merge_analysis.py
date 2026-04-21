@@ -68,13 +68,18 @@ def _fetch_diff(
         f"/pull-requests/{pr_id}/diff/{file_path}?contextLines=5"
     )
     try:
-        data = api_get(session, url)
+        data = api_get(session, url, allow_404=True)
+        if not data or not data.get("diffs"):
+            _diff_cache[key] = None
+            return None
         text = _bb_diff_to_text(data)
         _diff_cache[key] = text if text.strip() else None
         return _diff_cache[key]
+    except SystemExit:
+        # api_get calls sys.exit on 401/403 — let it through
+        raise
     except Exception as exc:
-        log.warning("Failed to fetch diff for %s in %s/%s#%d: %s",
-                    file_path, project_key, repo_slug, pr_id, exc)
+        log.debug("No diff for %s in %s/%s#%d: %s", file_path, project_key, repo_slug, pr_id, exc)
         _diff_cache[key] = None
         return None
 
