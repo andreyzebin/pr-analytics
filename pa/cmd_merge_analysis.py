@@ -27,12 +27,13 @@ log = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "judge_merge_acceptance.txt"
 
-# In-memory cache: (repo_id, pr_id, file_path) → diff_text
-_diff_cache: dict[tuple, str | None] = {}
+# In-memory caches
+_diff_cache: dict[tuple, tuple[str, str | None] | None] = {}  # key → (diff_text, toHash) | None
+_snippet_cache: dict[tuple, str | None] = {}  # (proj, repo, file, hash, line) → snippet
 
 
 def _bb_diff_to_text(data: dict) -> str:
-    """Convert Bitbucket Server diff JSON to unified diff text."""
+    """Convert Bitbucket Server diff JSON to unified diff text with line numbers."""
     lines = []
     for diff in data.get("diffs", []):
         src = (diff.get("source") or {}).get("toString", "/dev/null")
@@ -45,10 +46,21 @@ def _bb_diff_to_text(data: dict) -> str:
             dh = hunk.get("destinationLine", 0)
             ds = hunk.get("destinationSpan", 0)
             lines.append(f"@@ -{sh},{ss} +{dh},{ds} @@")
+            src_n, dst_n = sh, dh
             for seg in hunk.get("segments", []):
-                prefix = {"CONTEXT": " ", "ADDED": "+", "REMOVED": "-"}.get(seg["type"], " ")
+                stype = seg["type"]
                 for line in seg.get("lines", []):
-                    lines.append(f"{prefix}{line['line']}")
+                    text = line["line"]
+                    if stype == "REMOVED":
+                        lines.append(f"-{src_n:>4}      | {text}")
+                        src_n += 1
+                    elif stype == "ADDED":
+                        lines.append(f"+     {dst_n:>4} | {text}")
+                        dst_n += 1
+                    else:  # CONTEXT
+                        lines.append(f" {src_n:>4} {dst_n:>4} | {text}")
+                        src_n += 1
+                        dst_n += 1
     return "\n".join(lines)
 
 
@@ -57,12 +69,12 @@ def _fetch_diff(
     project_key: str, repo_slug: str, pr_id: int,
     file_path: str,
     repo_id: int,
-) -> str | None:
-    """Fetch diff for a specific file in a PR. Caches per (repo_id, pr_id, file_path)."""
+) -> tuple[str, str | None] | None:
+    """Fetch diff for a file in a PR. Returns (diff_text, toHash) or None.
+    Caches per (repo_id, pr_id, file_path). toHash is the source commit SHA."""
     key = (repo_id, pr_id, file_path)
     if key in _diff_cache:
         return _diff_cache[key]
-    # Bitbucket Server: path goes unencoded in the URL path segment
     url = (
         f"{bb_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
         f"/pull-requests/{pr_id}/diff/{file_path}?contextLines=5"
@@ -73,14 +85,57 @@ def _fetch_diff(
             _diff_cache[key] = None
             return None
         text = _bb_diff_to_text(data)
-        _diff_cache[key] = text if text.strip() else None
-        return _diff_cache[key]
+        to_hash = data.get("toHash")
+        result = (text, to_hash) if text.strip() else None
+        _diff_cache[key] = result
+        return result
     except SystemExit:
-        # api_get calls sys.exit on 401/403 — let it through
         raise
     except Exception as exc:
         log.debug("No diff for %s in %s/%s#%d: %s", file_path, project_key, repo_slug, pr_id, exc)
         _diff_cache[key] = None
+        return None
+
+
+def _fetch_source_snippet(
+    session, bb_url: str,
+    project_key: str, repo_slug: str,
+    file_path: str, to_hash: str,
+    anchor_line: int,
+    context: int = 10,
+) -> str | None:
+    """Fetch source file at toHash (PR source commit) and return ±context lines around anchor.
+    Works even for merged PRs with deleted branches — toHash is a commit SHA."""
+    key = (project_key, repo_slug, file_path, to_hash, anchor_line)
+    if key in _snippet_cache:
+        return _snippet_cache[key]
+
+    start_line = max(0, anchor_line - context - 1)  # API is 0-based
+    limit = context * 2 + 1
+    url = (
+        f"{bb_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
+        f"/browse/{file_path}?at={to_hash}&start={start_line}&limit={limit}"
+    )
+    try:
+        data = api_get(session, url, allow_404=True)
+        if not data or not data.get("lines"):
+            _snippet_cache[key] = None
+            return None
+        lines = []
+        line_num = data.get("start", start_line) + 1  # API start is 0-based
+        for entry in data["lines"]:
+            text = entry.get("text", "")
+            marker = " >>>" if line_num == anchor_line else "    "
+            lines.append(f"{line_num:>4}{marker} | {text}")
+            line_num += 1
+        snippet = "\n".join(lines)
+        _snippet_cache[key] = snippet
+        return snippet
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log.debug("Cannot fetch source snippet %s@%s:%d: %s", file_path, to_hash[:8], anchor_line, exc)
+        _snippet_cache[key] = None
         return None
 
 
@@ -223,12 +278,12 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             break
 
         # Fetch diff
-        diff = _fetch_diff(
+        diff_result = _fetch_diff(
             session, bb_url,
             row["project_key"], row["slug"], row["pr_id"],
             row["file_path"], row["repo_id"],
         )
-        if not diff:
+        if not diff_result:
             n_skip += 1
             print(
                 f"  [{i}/{total}]  {repo}#{row['pr_id']} {row['file_path']}"
@@ -237,15 +292,31 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
             )
             continue
 
-        diff_truncated = _truncate_diff(diff, max_diff_chars)
+        diff_text, to_hash = diff_result
+
+        # Fetch source snippet around anchor line (works for merged PRs)
+        anchor_line = row["line"]
+        source_snippet = ""
+        if to_hash and anchor_line:
+            snippet = _fetch_source_snippet(
+                session, bb_url,
+                row["project_key"], row["slug"],
+                row["file_path"], to_hash,
+                anchor_line,
+            )
+            if snippet:
+                source_snippet = snippet
+
+        diff_truncated = _truncate_diff(diff_text, max_diff_chars)
         comment_text = (row["comment_text"] or "")[:max_comment_chars]
 
         prompt = prompt_template.format(
             pr_title=row["pr_title"] or "",
             repo=repo,
             file_path=row["file_path"],
-            line=row["line"] or "?",
+            line=anchor_line or "?",
             comment_text=comment_text,
+            source_snippet=source_snippet or "(недоступен)",
             diff_content=diff_truncated,
         )
 
