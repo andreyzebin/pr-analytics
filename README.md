@@ -5,8 +5,8 @@
 ## Требования
 
 - Python 3.9+
-- Зависимости: `requests`, `pandas`, `matplotlib`, `tabulate`, `pyyaml`, `pytest`
-- Клиентский TLS-сертификат и CA-бандл (если требует инстанс)
+- Зависимости: `requests`, `pandas`, `matplotlib`, `tabulate`, `pyyaml`, `truststore`, `pytest`
+- Клиентский TLS-сертификат (если требует инстанс); CA-бандл опционален — по умолчанию используются сертификаты ОС
 
 ## Установка
 
@@ -82,12 +82,14 @@ source .env
 | `BB_TOKEN` / `BITBUCKET_SERVER_BEARER_TOKEN` | Personal Access Token |
 | `BB_URL` | Базовый URL инстанса |
 | `BB_DB` | Путь к SQLite-файлу |
-| `REQUESTS_CA_BUNDLE` | Путь к CA-бандлу |
+| `REQUESTS_CA_BUNDLE` | Путь к CA-бандлу (если не задан — системные сертификаты ОС через `truststore`) |
 | `BITBUCKET_SERVER_CLIENT_CERT` | Путь к клиентскому PEM (mTLS) |
 | `ANTHROPIC_API_KEY` | API-ключ Anthropic (для LLM-судьи) |
 | `DEEPSEEK_API_KEY` | API-ключ DeepSeek (для LLM-судьи) |
 
 > В CI/CD достаточно выставить только `BB_TOKEN` — остальное берётся из `config.yaml`.
+
+**SSL/TLS:** при запуске автоматически подключается библиотека `truststore`, которая использует хранилище сертификатов ОС (Windows Certificate Store, macOS Keychain, Linux `/etc/ssl/certs`). Это решает проблему с корпоративными прокси (CheckPoint, Zscaler), которые подменяют сертификаты — их CA автоматически подхватывается без явного указания `REQUESTS_CA_BUNDLE`.
 
 ---
 
