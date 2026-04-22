@@ -26,52 +26,89 @@ class Series:
     rows: list = field(default_factory=list)
 
 
+def _group_rows(rows: list, group_by: str) -> dict[str, list]:
+    """Split rows into groups by the given attribute. Returns {group_label: rows}."""
+    if group_by == "project":
+        by_group: dict[str, list] = {}
+        for r in rows:
+            g = r.get("project_key") or "?"
+            by_group.setdefault(g, []).append(r)
+        return by_group
+    log.error("Unsupported --group-by %r. Supported: project", group_by)
+    sys.exit(1)
+
+
 def _build_series(
     raw_per_repo: dict[str, list],
     split_arg: str | None,
     commenter_pr_set: set[tuple] | None = None,
+    group_by: str | None = None,
 ) -> list[Series]:
     """
     Default: one Series per repo.
     --split reviewer:<slug>  — split by presence in PR reviewers list.
     --split commenter:<slug> — split by presence of at least one comment from slug.
+    --split total[:<label>]  — one series with everything combined.
+    --group-by project       — further split each series by project key.
     """
+    # ── Step 1: build base series from --split (or default: one per repo) ──
+    base_series: list[Series] = []
     if split_arg is None:
-        return [Series(label=lbl, rows=rows) for lbl, rows in raw_per_repo.items()]
+        if group_by is not None:
+            # When grouping without split, aggregate all rows so the group step
+            # produces one series per group (not per repo × per group).
+            all_rows = [r for rows in raw_per_repo.values() for r in rows]
+            base_series = [Series(label="", rows=all_rows)]
+        else:
+            base_series = [Series(label=lbl, rows=rows) for lbl, rows in raw_per_repo.items()]
+    else:
+        parts = split_arg.split(":", 1)
+        kind, value = parts[0], parts[1] if len(parts) > 1 else ""
+        all_rows = [r for rows in raw_per_repo.values() for r in rows]
 
-    parts = split_arg.split(":", 1)
-    kind, value = parts[0], parts[1] if len(parts) > 1 else ""
-    all_rows = [r for rows in raw_per_repo.values() for r in rows]
+        if kind == "reviewer":
+            slug = value
+            with_rows    = [r for r in all_rows if slug in json.loads(r["reviewers"] or "[]")]
+            without_rows = [r for r in all_rows if slug not in json.loads(r["reviewers"] or "[]")]
+            base_series = [
+                Series(label=f"+ {slug}", rows=with_rows),
+                Series(label=f"- {slug}", rows=without_rows),
+            ]
+        elif kind == "commenter":
+            slug = value
+            ps = commenter_pr_set or set()
+            with_rows    = [r for r in all_rows if (r["repo_id"], r["pr_id"]) in ps]
+            without_rows = [r for r in all_rows if (r["repo_id"], r["pr_id"]) not in ps]
+            base_series = [
+                Series(label=f"∈ {slug}", rows=with_rows),
+                Series(label=f"∉ {slug}", rows=without_rows),
+            ]
+        elif kind == "total":
+            label = value if value else "Total"
+            base_series = [Series(label=label, rows=all_rows)]
+        else:
+            log.error(
+                "Unsupported --split kind %r. Supported: reviewer:<slug>, commenter:<slug>, total[:<label>]",
+                kind,
+            )
+            sys.exit(1)
 
-    if kind == "reviewer":
-        slug = value
-        with_rows    = [r for r in all_rows if slug in json.loads(r["reviewers"] or "[]")]
-        without_rows = [r for r in all_rows if slug not in json.loads(r["reviewers"] or "[]")]
-        return [
-            Series(label=f"+ {slug}", rows=with_rows),
-            Series(label=f"- {slug}", rows=without_rows),
-        ]
+    # ── Step 2: optionally further split each base series by group ─────────
+    if group_by is None:
+        return base_series
 
-    if kind == "commenter":
-        slug = value
-        ps = commenter_pr_set or set()
-        with_rows    = [r for r in all_rows if (r["repo_id"], r["pr_id"]) in ps]
-        without_rows = [r for r in all_rows if (r["repo_id"], r["pr_id"]) not in ps]
-        return [
-            Series(label=f"∈ {slug}", rows=with_rows),
-            Series(label=f"∉ {slug}", rows=without_rows),
-        ]
-
-    if kind == "total":
-        # Aggregate all repos into one series
-        label = value if value else "Total"
-        return [Series(label=label, rows=all_rows)]
-
-    log.error(
-        "Unsupported --split kind %r. Supported: reviewer:<slug>, commenter:<slug>, total[:<label>]",
-        kind,
-    )
-    sys.exit(1)
+    result: list[Series] = []
+    # Determine if split is trivial (no split, or "total", or base label empty) —
+    # in that case the group label alone is descriptive enough.
+    trivial = split_arg is None or (split_arg.split(":", 1)[0] == "total")
+    for bs in base_series:
+        for group, rows in sorted(_group_rows(bs.rows, group_by).items()):
+            if trivial or not bs.label:
+                label = group
+            else:
+                label = f"{group} / {bs.label}"
+            result.append(Series(label=label, rows=rows))
+    return result
 
 
 # ── Trend rendering ───────────────────────────────────────────────────────────
@@ -246,6 +283,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     plot_type = getattr(args, "plot_type", "box")
     period    = getattr(args, "period", "month")
     split_arg = getattr(args, "split", None)
+    group_by  = getattr(args, "group_by", None)
     layout    = getattr(args, "layout", "stack")
     reviewer  = getattr(args, "reviewer", None)
 
@@ -296,7 +334,11 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
         label = f"{proj_key}/{repo_slug}"
         if rows:
-            raw_per_repo[label] = [dict(r) for r in rows]
+            row_dicts = [dict(r) for r in rows]
+            # Attach project_key for --group-by project support
+            for d in row_dicts:
+                d["project_key"] = proj_key
+            raw_per_repo[label] = row_dicts
 
     # ── Augment with agent_comment_count (separate query) ────────────────────
     author_arg = getattr(args, "author", None)
@@ -344,7 +386,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         sys.exit(4)
 
     # ── Build series ──────────────────────────────────────────────────────────
-    series_list = _build_series(raw_per_repo, split_arg, commenter_pr_set)
+    series_list = _build_series(raw_per_repo, split_arg, commenter_pr_set, group_by)
 
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
@@ -751,41 +793,62 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
     # ── total_repos: repo-level split — exclude repos with "+" presence ────────
     # For adoption tracking: "-agent" series should count only repos that have
-    # ZERO PRs-with-agent in the period, not repos that happen to have any
-    # PR-without-agent. Requires --split reviewer:<slug> or commenter:<slug>.
-    if "total_repos" in requested_metrics and split_arg and len(series_list) == 2:
+    # ZERO PRs-with-agent in the period. Exclusion happens per-group when
+    # --group-by is used (repo belongs to one project, so it's scoped naturally).
+    if "total_repos" in requested_metrics and split_arg:
         from pa.metrics import bucket_key as _bk_fn
-        # Build "+" repos per bucket from the first series (which represents "with agent")
-        plus_rows = series_list[0].rows
-        plus_repos_per_bucket: dict[str, set] = {}
-        for r in plus_rows:
-            if r["state"] != "MERGED" or not r.get("created_date"):
-                continue
-            bk = _bk_fn(r["created_date"], period)
-            plus_repos_per_bucket.setdefault(bk, set()).add(r["repo_id"])
 
-        # Recompute "-" series: only repos NOT in "+" set for same bucket
-        minus_rows = series_list[1].rows
-        minus_buckets: dict[str, set] = {}
-        for r in minus_rows:
-            if r["state"] != "MERGED" or not r.get("created_date"):
-                continue
-            bk = _bk_fn(r["created_date"], period)
-            if r["repo_id"] in plus_repos_per_bucket.get(bk, set()):
-                continue  # repo already has agent PR this period — exclude
-            minus_buckets.setdefault(bk, set()).add(r["repo_id"])
+        # Determine which rows are "+" (with agent) based on split kind
+        split_kind, split_value = (split_arg.split(":", 1) + [""])[:2]
 
-        # Update metric_results[total_repos] — keep "+" as-is, replace "-" counts
-        if "total_repos" in metric_results:
+        def _is_plus(r: dict) -> bool:
+            if split_kind == "reviewer":
+                return split_value in json.loads(r["reviewers"] or "[]")
+            if split_kind == "commenter":
+                return (r["repo_id"], r["pr_id"]) in (commenter_pr_set or set())
+            return True  # total — everything is "+", exclusion makes no sense
+
+        if split_kind in ("reviewer", "commenter"):
+            # Build plus_repos per (group, bucket). group_key = project_key when grouping, else ""
+            all_rows_flat = [r for rows in raw_per_repo.values() for r in rows]
+            plus_repos: dict[tuple, set] = {}
+            for r in all_rows_flat:
+                if r["state"] != "MERGED" or not r.get("created_date") or not _is_plus(r):
+                    continue
+                group_key = r.get("project_key", "") if group_by == "project" else ""
+                bk = _bk_fn(r["created_date"], period)
+                plus_repos.setdefault((group_key, bk), set()).add(r["repo_id"])
+
+            # Identify "-" series by label prefix / marker and recompute
             updated = []
-            for idx, (label, buckets) in enumerate(metric_results["total_repos"]):
-                if idx == 1:  # "-" series
-                    new_buckets = {bk: float(len(s)) for bk, s in minus_buckets.items()}
-                    updated.append((label, new_buckets))
-                    all_buckets.update(new_buckets.keys())
-                else:
+            for label, buckets in metric_results.get("total_repos", []):
+                # "+" labels start with "+ " or "∈ " (with optional "group / " prefix)
+                is_minus = ("- " in label) or ("∉ " in label)
+                if not is_minus:
                     updated.append((label, buckets))
-            metric_results["total_repos"] = updated
+                    continue
+
+                # Find the corresponding series' rows
+                matching_series = next((s for s in series_list if s.label == label), None)
+                if matching_series is None:
+                    updated.append((label, buckets))
+                    continue
+
+                new_buckets: dict[str, set] = {}
+                for r in matching_series.rows:
+                    if r["state"] != "MERGED" or not r.get("created_date"):
+                        continue
+                    group_key = r.get("project_key", "") if group_by == "project" else ""
+                    bk = _bk_fn(r["created_date"], period)
+                    if r["repo_id"] in plus_repos.get((group_key, bk), set()):
+                        continue  # repo has agent PR this period — exclude
+                    new_buckets.setdefault(bk, set()).add(r["repo_id"])
+                counts = {bk: float(len(s)) for bk, s in new_buckets.items()}
+                updated.append((label, counts))
+                all_buckets.update(counts.keys())
+
+            if updated:
+                metric_results["total_repos"] = updated
 
     if not all_buckets:
         log.error("No data to plot.")

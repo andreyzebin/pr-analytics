@@ -330,6 +330,21 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
   --split reviewer:ai-review-bot \
   --output output/adoption.html
 
+# Adoption в разрезе проектов: отдельная пара линий по каждому проекту
+.venv/bin/python pr_analytics.py plot \
+  --projects PROJ1,PROJ2,PROJ3 --since 2025-01-01 --state MERGED \
+  --type trend --period week \
+  --metrics total_repos \
+  --split reviewer:ai-review-bot --group-by project \
+  --output output/adoption_by_project.html
+
+# Активность проектов (total_prs по проектам, без split)
+.venv/bin/python pr_analytics.py plot \
+  --projects PROJ1,PROJ2,PROJ3 --since 2025-01-01 --state MERGED \
+  --type trend --period month \
+  --metrics total_prs --group-by project \
+  --output output/prs_by_project.html
+
 # Воронка эффективности AI-агента (агрегировано по всем проектам)
 .venv/bin/python pr_analytics.py plot \
   --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
@@ -370,7 +385,7 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 | `--judge-model` | LLM-модель судьи (default из конфига, см. `judge.model`) |
 | `--output` | `.png`, `.svg` или `.html` (интерактивный plotly, для `trend`) |
 
-**Режимы `--split`:**
+**Режимы `--split` (по критерию PR):**
 
 | Значение | Описание |
 |---|---|
@@ -379,6 +394,14 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 | `total[:<label>]` | Все репозитории в одну агрегированную серию |
 
 Без `--split` — одна серия на репозиторий.
+
+**Режимы `--group-by` (по атрибуту репа):**
+
+| Значение | Описание |
+|---|---|
+| `project` | По одной серии на каждый проект/неймспейс |
+
+Можно комбинировать: `--split reviewer:agent --group-by project` → N проектов × 2 серии (+/- agent), лейблы `"MCPN / + agent"`. При этом для `total_repos` exclusion "-agent исключает репы-с-agent" работает внутри каждой группы (один репо ∈ одному проекту).
 
 Cycle Time и Time to First Comment используют **логарифмическую** ось Y. Все trend-метрики группируются по `closed_date`.
 
