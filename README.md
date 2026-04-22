@@ -238,6 +238,7 @@ openssl pkcs12 -in .\client.p12 -out .\client.pem -nodes -passin pass:<password>
 | `acceptance_rate` | линейная | MERGED / (MERGED + DECLINED) × 100% |
 | `throughput` | линейная | Количество смерженных PR за период |
 | `total_prs` | линейная | Всего PR (MERGED + DECLINED) за период |
+| `total_repos` | bar | Активных репозиториев за период (уникальные репы с MERGED PR, по `created_date`). С `--split reviewer/commenter` — "+агент" = репы где ≥1 PR с агентом, "-агент" = репы с 0 PR с агентом (для отслеживания adoption) |
 | `time_to_first_comment` | лог | Медианное время до первого комментария от не-автора (часы) |
 | `agent_comments` | bar | Суммарное число корневых замечаний AI-агента за период (требует `--author`) |
 | `feedback_rate` | линейная | % замечаний агента, на которые отреагировали (реакция или ответ), требует `--author` |
@@ -266,6 +267,7 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 - `acceptance_rate` = `count(MERGED) / count(MERGED + DECLINED) × 100`
 - `throughput` = `count(MERGED)` за период
 - `total_prs` = `count(MERGED + DECLINED)` за период
+- `total_repos` = `count(DISTINCT repo_id)` среди MERGED PR с `created_date` в периоде. При `--split reviewer:<slug>` / `commenter:<slug>` "-" серия исключает репы, имеющие ≥1 PR с агентом в этом же периоде — чтобы видеть реальную adoption без дублей
 - `time_to_first_comment` = `median(first_non_author_comment_date - created_date)` часы
 - `agent_comments` = `sum(root comments by --author)` за период
 - `feedback_rate` = `comments_with_reactions_or_replies / total_comments × 100`
@@ -319,6 +321,14 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
   --metrics cycle_time,total_prs \
   --split commenter:ai-review-bot \
   --layout stack --output output/ai_effect.html
+
+# Adoption: сколько репов подключили агента vs ещё нет, понедельно
+.venv/bin/python pr_analytics.py plot \
+  --projects PROJ1,PROJ2 --since 2025-01-01 --state MERGED \
+  --type trend --period week \
+  --metrics total_repos \
+  --split reviewer:ai-review-bot \
+  --output output/adoption.html
 
 # Воронка эффективности AI-агента (агрегировано по всем проектам)
 .venv/bin/python pr_analytics.py plot \

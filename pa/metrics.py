@@ -86,6 +86,19 @@ def _total_prs(rows, period: str, state: str) -> dict[str, float]:
     return dict(buckets)
 
 
+def _total_repos(rows, period: str, state: str) -> dict[str, float]:
+    """Unique MERGED repos per period, bucketed by created_date.
+    Counts distinct repo_id where at least one MERGED PR was created in the period.
+    Works with --split: receives filtered rows (e.g., only PRs with/without agent),
+    so a repo appears in a period only if it has a matching PR in that period."""
+    buckets: dict[str, set] = defaultdict(set)
+    for r in rows:
+        if r["state"] != "MERGED" or not r.get("created_date"):
+            continue
+        buckets[bucket_key(r["created_date"], period)].add(r["repo_id"])
+    return {bk: float(len(s)) for bk, s in buckets.items()}
+
+
 def _agent_comments(rows, period: str, state: str) -> dict[str, float]:
     """Total root comments by agent per period, bucketed by closed_date."""
     buckets: dict[str, float] = defaultdict(float)
@@ -141,6 +154,10 @@ METRICS: dict[str, MetricDef] = {
     "total_prs": MetricDef(
         label="Total PRs", unit="count", plot_kind="bar",
         compute=_total_prs, fmt=lambda v: str(int(v)),
+    ),
+    "total_repos": MetricDef(
+        label="Active Repos", unit="count", plot_kind="bar",
+        compute=_total_repos, fmt=lambda v: str(int(v)),
     ),
     "time_to_first_comment": MetricDef(
         label="Time to First Review Comment", unit="hours", plot_kind="line",

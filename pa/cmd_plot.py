@@ -749,6 +749,44 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             all_buckets.update(buckets.keys())
         metric_results[metric_name] = series_data
 
+    # ── total_repos: repo-level split — exclude repos with "+" presence ────────
+    # For adoption tracking: "-agent" series should count only repos that have
+    # ZERO PRs-with-agent in the period, not repos that happen to have any
+    # PR-without-agent. Requires --split reviewer:<slug> or commenter:<slug>.
+    if "total_repos" in requested_metrics and split_arg and len(series_list) == 2:
+        from pa.metrics import bucket_key as _bk_fn
+        # Build "+" repos per bucket from the first series (which represents "with agent")
+        plus_rows = series_list[0].rows
+        plus_repos_per_bucket: dict[str, set] = {}
+        for r in plus_rows:
+            if r["state"] != "MERGED" or not r.get("created_date"):
+                continue
+            bk = _bk_fn(r["created_date"], period)
+            plus_repos_per_bucket.setdefault(bk, set()).add(r["repo_id"])
+
+        # Recompute "-" series: only repos NOT in "+" set for same bucket
+        minus_rows = series_list[1].rows
+        minus_buckets: dict[str, set] = {}
+        for r in minus_rows:
+            if r["state"] != "MERGED" or not r.get("created_date"):
+                continue
+            bk = _bk_fn(r["created_date"], period)
+            if r["repo_id"] in plus_repos_per_bucket.get(bk, set()):
+                continue  # repo already has agent PR this period — exclude
+            minus_buckets.setdefault(bk, set()).add(r["repo_id"])
+
+        # Update metric_results[total_repos] — keep "+" as-is, replace "-" counts
+        if "total_repos" in metric_results:
+            updated = []
+            for idx, (label, buckets) in enumerate(metric_results["total_repos"]):
+                if idx == 1:  # "-" series
+                    new_buckets = {bk: float(len(s)) for bk, s in minus_buckets.items()}
+                    updated.append((label, new_buckets))
+                    all_buckets.update(new_buckets.keys())
+                else:
+                    updated.append((label, buckets))
+            metric_results["total_repos"] = updated
+
     if not all_buckets:
         log.error("No data to plot.")
         sys.exit(4)
