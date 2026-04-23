@@ -94,6 +94,7 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
     batch_size = getattr(args, "batch_size", 50)
     dry_run = getattr(args, "dry_run", False)
     force = getattr(args, "force", False)
+    verbose = getattr(args, "verbose", False)
     budget_tokens = getattr(args, "budget_tokens", None)   # None = unlimited
     max_comment_chars = getattr(args, "max_comment_chars", 2000)
 
@@ -279,8 +280,14 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
             replies=replies,
         )
 
+        if verbose:
+            print(f"\n{'═' * 80}")
+            print(f"[{i}/{total}]  {repo}#{row['pr_id']}  comment#{comment_id}")
+            print(f"{'─' * 80}  PROMPT")
+            print(prompt)
+
         try:
-            verdict = judge.judge(prompt)
+            verdict, raw = judge.judge_raw(prompt)
             total_tokens += verdict.tokens_used
             conn.execute(
                 """INSERT OR REPLACE INTO comment_analysis
@@ -301,6 +308,12 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
             elapsed = time.monotonic() - start
             eta = elapsed / i * (total - i)
             tokens_str = f"  ~{total_tokens:,}tok" if verdict.tokens_used else ""
+
+            if verbose:
+                print(f"{'─' * 80}  RAW RESPONSE")
+                print(raw if raw else "(empty)")
+                print(f"{'─' * 80}  PARSED: verdict={verdict.verdict} confidence={verdict.confidence} reasoning={verdict.reasoning!r}")
+                print(f"{'═' * 80}")
             print(
                 f"  [{i}/{total}]  {repo}#{row['pr_id']} comment#{comment_id}"
                 f"  → {verdict.verdict} ({verdict.confidence})"
@@ -314,7 +327,16 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
 
         except Exception as exc:
             n_error += 1
+            raw = getattr(exc, "raw", None)
+            tok = getattr(exc, "tokens_used", 0)
+            if tok:
+                total_tokens += tok
             log.warning("Failed to judge comment %d: %s", comment_id, exc)
+            if verbose:
+                print(f"{'─' * 80}  RAW RESPONSE (parse failed)")
+                print(f"<<<{raw}>>>" if raw is not None else "(no raw response captured)")
+                print(f"{'─' * 80}  ERROR: {exc}")
+                print(f"{'═' * 80}")
             print(f"  [{i}/{total}]  comment#{comment_id}  ERROR: {exc}", flush=True)
 
     # ── full summary (including previously cached results) ─────────────────

@@ -70,15 +70,27 @@ class LLMJudge:
         self._tool_choice = tool_choice  # "auto" → use function calling
 
     def judge(self, prompt: str) -> JudgeVerdict:
+        verdict, _ = self.judge_raw(prompt)
+        return verdict
+
+    def judge_raw(self, prompt: str) -> tuple[JudgeVerdict, str]:
+        """Same as judge(), but also returns the raw LLM response text
+        (or JSON-dumped tool-call args) for debugging/verbose output.
+        On parse error, the raw text is attached to the exception as .raw."""
         if self._tool_choice == "auto" and self._base_url:
             data, tokens = self._call_with_tool(prompt, _VERDICT_TOOL)
             verdict = self._normalize_verdict(data)
             verdict.tokens_used = tokens
-            return verdict
+            return verdict, json.dumps(data, ensure_ascii=False)
         raw, tokens = self._call(prompt)
-        verdict = self._parse(raw)
+        try:
+            verdict = self._parse(raw)
+        except Exception as exc:
+            exc.raw = raw  # type: ignore[attr-defined]
+            exc.tokens_used = tokens  # type: ignore[attr-defined]
+            raise
         verdict.tokens_used = tokens
-        return verdict
+        return verdict, raw
 
     def call_json(self, prompt: str) -> tuple[dict, int]:
         """Generic call: returns (parsed_dict, tokens_used)."""

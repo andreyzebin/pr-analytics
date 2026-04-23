@@ -121,6 +121,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Truncate comment text to this length before sending to LLM (default: 2000)")
     p.add_argument("--force", action="store_true",
                    help="Re-analyze all comments, ignoring cached results")
+    p.add_argument("--verbose", action="store_true",
+                   help="Print full prompt and LLM response for each comment (useful for debugging parse errors)")
     p.add_argument("--dry-run", action="store_true", dest="dry_run",
                    help="Show which comments would be analyzed, without calling the LLM")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
