@@ -563,9 +563,27 @@ judge:
   model: "deepseek-reasoner"
   api_key: "${DEEPSEEK_API_KEY}"
   base_url: "https://api.deepseek.com/v1"   # OpenAI-compatible; убрать для Anthropic
+
+  # Опционально: structured output через function calling
+  # tool_choice: "auto"
+
+  # Опционально: переопределить лимит ответа (default: 1024, или 4096 для reasoner/-r1)
+  # max_tokens: 2048
+
+  # Опционально: не передавать temperature (некоторые thinking-модели её не принимают)
+  # no_temperature: true
+
+  # Опционально: extra_body для OpenAI SDK. Полезно для:
+  #   - Отключить thinking у Qwen3 (vLLM/SGLang):
+  #       extra_body:
+  #         chat_template_kwargs:
+  #           enable_thinking: false
+  #   - Gemini: thinking_config: {thinking_budget: 0}
 ```
 
-Поддерживается любой OpenAI-compatible endpoint (DeepSeek, OpenRouter, local LLM). Для Anthropic — убрать `base_url` и выставить `ANTHROPIC_API_KEY`.
+Поддерживается любой OpenAI-compatible endpoint (DeepSeek, OpenRouter, local LLM, vLLM). Для Anthropic — убрать `base_url` и выставить `ANTHROPIC_API_KEY`.
+
+**Thinking-модели** (Qwen3, DeepSeek-R1, Gemini 2.5, o1/o3): ответ приходит с `<think>...</think>` блоком + JSON. Judge их автоматически вырезает перед парсингом, но если think-блок съедает весь `max_tokens` — ответ обрывается. В таком случае либо увеличьте `max_tokens`, либо отключите thinking через `extra_body`.
 
 После анализа можно построить тренд:
 

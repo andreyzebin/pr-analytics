@@ -63,11 +63,17 @@ _GENERIC_JSON_TOOL = {
 
 class LLMJudge:
     def __init__(self, model: str, api_key: str, base_url: str | None = None,
-                 tool_choice: str | None = None):
+                 tool_choice: str | None = None,
+                 extra_body: dict | None = None,
+                 max_tokens: int | None = None,
+                 no_temperature: bool = False):
         self._model = model
         self._api_key = api_key
         self._base_url = base_url    # None → Anthropic; str → OpenAI-compatible
         self._tool_choice = tool_choice  # "auto" → use function calling
+        self._extra_body = extra_body  # e.g. {"chat_template_kwargs": {"enable_thinking": False}}
+        self._cfg_max_tokens = max_tokens
+        self._no_temperature = no_temperature
 
     def judge(self, prompt: str) -> JudgeVerdict:
         verdict, _ = self.judge_raw(prompt)
@@ -104,16 +110,14 @@ class LLMJudge:
     def _call(self, prompt: str) -> tuple[str, int]:
         """Returns (response_text, total_tokens_used)."""
         model_lower = self._model.lower()
-        # Reasoning/thinking models need more tokens (think block + answer) and
-        # don't support temperature parameter.
-        is_thinking = (
-            "reasoner" in model_lower
-            or "-r1" in model_lower
-            or "qwen3" in model_lower
-            or "gemini-2.5" in model_lower
-            or "o1" in model_lower or "o3" in model_lower
-        )
-        max_tokens = 4096 if is_thinking else 1024
+        # Heuristic: known reasoning models that can't take temperature and
+        # need headroom for think tokens. Conservative — only clear cases.
+        # For Qwen3 with thinking enabled set judge.max_tokens + no_temperature
+        # in config, or disable thinking via judge.extra_body.chat_template_kwargs.
+        is_reasoner = "reasoner" in model_lower or "-r1" in model_lower
+
+        max_tokens = self._cfg_max_tokens or (4096 if is_reasoner else 1024)
+        skip_temp = self._no_temperature or is_reasoner
 
         if self._base_url:
             from openai import OpenAI
@@ -123,8 +127,10 @@ class LLMJudge:
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_tokens,
             )
-            if not is_thinking:
+            if not skip_temp:
                 kwargs["temperature"] = 0
+            if self._extra_body:
+                kwargs["extra_body"] = self._extra_body
             resp = client.chat.completions.create(**kwargs)
             tokens = resp.usage.total_tokens if resp.usage else 0
             return resp.choices[0].message.content or "", tokens
@@ -147,12 +153,9 @@ class LLMJudge:
         from openai import OpenAI
         client = OpenAI(api_key=self._api_key, base_url=self._base_url)
         model_lower = self._model.lower()
-        is_thinking = (
-            "reasoner" in model_lower or "-r1" in model_lower
-            or "qwen3" in model_lower or "gemini-2.5" in model_lower
-            or "o1" in model_lower or "o3" in model_lower
-        )
-        max_tokens = 4096 if is_thinking else 1024
+        is_reasoner = "reasoner" in model_lower or "-r1" in model_lower
+        max_tokens = self._cfg_max_tokens or (4096 if is_reasoner else 1024)
+        skip_temp = self._no_temperature or is_reasoner
         kwargs: dict = dict(
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
@@ -160,8 +163,10 @@ class LLMJudge:
             tool_choice="auto",
             max_tokens=max_tokens,
         )
-        if not is_thinking:
+        if not skip_temp:
             kwargs["temperature"] = 0
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
         resp = client.chat.completions.create(**kwargs)
         tokens = resp.usage.total_tokens if resp.usage else 0
         msg = resp.choices[0].message
@@ -219,3 +224,22 @@ class LLMJudge:
     def _parse(raw: str) -> JudgeVerdict:
         data = LLMJudge._parse_json(raw)
         return LLMJudge._normalize_verdict(data)
+
+
+def build_judge(model: str, api_key: str, base_url: str | None, cfg: dict) -> "LLMJudge":
+    """Build an LLMJudge honoring all judge.* config options."""
+    from pa.config import (
+        resolve_judge_tool_choice,
+        resolve_judge_extra_body,
+        resolve_judge_max_tokens,
+        resolve_judge_no_temperature,
+    )
+    return LLMJudge(
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+        tool_choice=resolve_judge_tool_choice(cfg),
+        extra_body=resolve_judge_extra_body(cfg),
+        max_tokens=resolve_judge_max_tokens(cfg),
+        no_temperature=resolve_judge_no_temperature(cfg),
+    )

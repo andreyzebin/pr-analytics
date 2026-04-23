@@ -231,9 +231,8 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
 
     # ── run judge ─────────────────────────────────────────────────────────────
     prompt_template = _load_prompt()
-    from pa.config import resolve_judge_tool_choice
-    tool_choice = resolve_judge_tool_choice(cfg)
-    judge = LLMJudge(model=judge_model, api_key=api_key, base_url=base_url, tool_choice=tool_choice)
+    from pa.judge import build_judge
+    judge = build_judge(judge_model, api_key, base_url, cfg)
 
     now_ms = int(time.time() * 1000)
     n_yes = n_no = n_unclear = n_error = 0

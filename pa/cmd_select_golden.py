@@ -977,9 +977,8 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
             log.error("No API key for LLM judge. Set ANTHROPIC_API_KEY or DEEPSEEK_API_KEY.")
             conn.close()
             sys.exit(1)
-        from pa.config import resolve_judge_tool_choice
-        tool_choice = resolve_judge_tool_choice(cfg)
-        judge = LLMJudge(model=classifier_model, api_key=api_key, base_url=base_url, tool_choice=tool_choice)
+        from pa.judge import build_judge
+        judge = build_judge(classifier_model, api_key, base_url, cfg)
 
     if "classify" in steps:
         print(f"\nPhase 2a: classify comments  (model={classifier_model})")
@@ -992,7 +991,7 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
         # If analyze_model differs from classifier, create a new judge instance
         analyze_judge = judge
         if analyze_model != classifier_model:
-            analyze_judge = LLMJudge(model=analyze_model, api_key=api_key, base_url=base_url, tool_choice=tool_choice)
+            analyze_judge = build_judge(analyze_model, api_key, base_url, cfg)
         print(f"\nPhase 2b: analyze unanalyzed comments  (model={analyze_model})")
         _run_analyze_step(conn, candidates, analyze_judge, analyze_model, budget, max_chars, exclude_authors)
         # Set change_judge_model so score step picks up the results
@@ -1017,7 +1016,7 @@ def cmd_select_golden(args: argparse.Namespace, cfg: dict) -> None:
         if judge is None or jm != classifier_model:
             api_key  = resolve_judge_api_key(cfg)
             base_url = resolve_judge_base_url(cfg)
-            judge = LLMJudge(model=jm, api_key=api_key, base_url=base_url, tool_choice=tool_choice)
+            judge = build_judge(jm, api_key, base_url, cfg)
         print(f"\nPhase 4: final judge  (model={jm})")
         _run_judge_step(conn, scored, judge, jm, scorer_model, budget, top_pct, max_chars)
 

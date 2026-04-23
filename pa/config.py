@@ -127,3 +127,18 @@ def resolve_judge_base_url(cfg: dict) -> Optional[str]:
 
 def resolve_judge_tool_choice(cfg: dict) -> Optional[str]:
     return _judge_cfg(cfg).get("tool_choice") or None
+
+
+def resolve_judge_extra_body(cfg: dict) -> Optional[dict]:
+    """Extra body params passed to the OpenAI SDK (e.g. chat_template_kwargs)."""
+    v = _judge_cfg(cfg).get("extra_body")
+    return v if isinstance(v, dict) else None
+
+
+def resolve_judge_max_tokens(cfg: dict) -> Optional[int]:
+    v = _judge_cfg(cfg).get("max_tokens")
+    return int(v) if v else None
+
+
+def resolve_judge_no_temperature(cfg: dict) -> bool:
+    return bool(_judge_cfg(cfg).get("no_temperature", False))

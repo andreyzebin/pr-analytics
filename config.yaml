@@ -35,6 +35,23 @@ judge:
   # Leave empty or omit for plain text mode (default).
   # tool_choice: "auto"
 
+  # Override max_tokens (default: 1024, or 4096 for reasoner/-r1 models)
+  # max_tokens: 2048
+
+  # Skip sending temperature=0 (some thinking models reject it)
+  # no_temperature: true
+
+  # Arbitrary extra_body passed to the OpenAI SDK call. Use cases:
+  #   - Disable Qwen3 thinking mode (vLLM / SGLang):
+  #       extra_body:
+  #         chat_template_kwargs:
+  #           enable_thinking: false
+  #   - Gemini thinking budget:
+  #       extra_body:
+  #         thinking_config:
+  #           thinking_budget: 0
+  # extra_body: {}
+
 golden:
   # Heuristic filter defaults for select-golden command
   min_lifetime_h: 0.25    # 15 minutes
