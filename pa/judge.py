@@ -103,16 +103,27 @@ class LLMJudge:
 
     def _call(self, prompt: str) -> tuple[str, int]:
         """Returns (response_text, total_tokens_used)."""
+        model_lower = self._model.lower()
+        # Reasoning/thinking models need more tokens (think block + answer) and
+        # don't support temperature parameter.
+        is_thinking = (
+            "reasoner" in model_lower
+            or "-r1" in model_lower
+            or "qwen3" in model_lower
+            or "gemini-2.5" in model_lower
+            or "o1" in model_lower or "o3" in model_lower
+        )
+        max_tokens = 4096 if is_thinking else 1024
+
         if self._base_url:
             from openai import OpenAI
             client = OpenAI(api_key=self._api_key, base_url=self._base_url)
-            is_reasoner = "reasoner" in self._model or "-r1" in self._model.lower()
             kwargs: dict = dict(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1024,
+                max_tokens=max_tokens,
             )
-            if not is_reasoner:
+            if not is_thinking:
                 kwargs["temperature"] = 0
             resp = client.chat.completions.create(**kwargs)
             tokens = resp.usage.total_tokens if resp.usage else 0
@@ -122,7 +133,7 @@ class LLMJudge:
             client = anthropic.Anthropic(api_key=self._api_key)
             msg = client.messages.create(
                 model=self._model,
-                max_tokens=1024,
+                max_tokens=max_tokens,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -135,15 +146,21 @@ class LLMJudge:
         """Call LLM with function calling, return (parsed_args_dict, tokens)."""
         from openai import OpenAI
         client = OpenAI(api_key=self._api_key, base_url=self._base_url)
-        is_reasoner = "reasoner" in self._model or "-r1" in self._model.lower()
+        model_lower = self._model.lower()
+        is_thinking = (
+            "reasoner" in model_lower or "-r1" in model_lower
+            or "qwen3" in model_lower or "gemini-2.5" in model_lower
+            or "o1" in model_lower or "o3" in model_lower
+        )
+        max_tokens = 4096 if is_thinking else 1024
         kwargs: dict = dict(
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
             tools=[tool],
             tool_choice="auto",
-            max_tokens=1024,
+            max_tokens=max_tokens,
         )
-        if not is_reasoner:
+        if not is_thinking:
             kwargs["temperature"] = 0
         resp = client.chat.completions.create(**kwargs)
         tokens = resp.usage.total_tokens if resp.usage else 0
@@ -162,8 +179,18 @@ class LLMJudge:
 
     @staticmethod
     def _parse_json(raw: str) -> dict:
-        """Parse JSON from LLM response, stripping markdown fences."""
-        text = raw.strip()
+        """Parse JSON from LLM response, stripping markdown fences and
+        Qwen/DeepSeek-style <think>...</think> reasoning blocks."""
+        text = raw
+
+        # Strip <think>...</think> blocks (Qwen3, DeepSeek-R1 in thinking mode).
+        # Handles both closed and unclosed (truncated) think blocks.
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        # If a <think> was opened but not closed (response truncated), drop everything up to it.
+        if "<think>" in text:
+            text = text.split("<think>", 1)[0]
+
+        text = text.strip()
         if text.startswith("```"):
             lines = text.split("\n")
             text = "\n".join(lines[1:])
