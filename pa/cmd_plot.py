@@ -19,6 +19,32 @@ from pa.utils import collect_repos_from_args, date_to_ms, ms_to_date
 log = logging.getLogger(__name__)
 
 
+def _build_dsl_vars(args, cfg, *, conn=None, pr_rows=None,
+                    since_ts=None, until_ts=None, repo_ids=None) -> dict:
+    """Single source of truth for the variable dict passed to Expr.eval().
+
+    Resolves CLI args (state/author/judge-model/split slug) and bundles the
+    `_`-prefixed runtime context (db conn, time window, repo scope, pre-fetched
+    PR rows) that source fetchers in pa/sources.py read.
+    """
+    split_arg = getattr(args, "split", None)
+    return {
+        "state":          getattr(args, "state", "MERGED"),
+        "author":         getattr(args, "author", None),
+        "judge_model":    resolve_judge_model(
+                              getattr(args, "judge_model", None), cfg),
+        "reviewer_slug":  (split_arg.split(":", 1)[1]
+                           if split_arg and split_arg.startswith("reviewer:") else None),
+        "commenter_slug": (split_arg.split(":", 1)[1]
+                           if split_arg and split_arg.startswith("commenter:") else None),
+        "_conn":          conn,
+        "_pr_rows":       pr_rows,
+        "_since_ts":      since_ts,
+        "_until_ts":      until_ts,
+        "_repo_ids":      repo_ids,
+    }
+
+
 def _sh_quote(s: str) -> str:
     """Quote for shell paste-back. Prefer single quotes; if `s` contains
     single quotes but no double quotes, use double quotes; else fall back to
@@ -650,20 +676,10 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             if aggregated_metrics:
                 all_buckets: set[str] = set()
                 agg_data: dict[str, dict[str, float]] = {}
-                vars_for_eval = {
-                    "state": state,
-                    "author": getattr(args, "author", None),
-                    "judge_model": resolve_judge_model(
-                        getattr(args, "judge_model", None), cfg),
-                    "reviewer_slug": (split_arg.split(":", 1)[1]
-                                      if split_arg and split_arg.startswith("reviewer:") else None),
-                    "commenter_slug": (split_arg.split(":", 1)[1]
-                                       if split_arg and split_arg.startswith("commenter:") else None),
-                    "_pr_rows": series.rows,
-                    "_conn": conn,
-                    "_since_ts": since_ts,
-                    "_until_ts": until_ts,
-                }
+                vars_for_eval = _build_dsl_vars(
+                    args, cfg, conn=conn, pr_rows=series.rows,
+                    since_ts=since_ts, until_ts=until_ts,
+                )
                 for mname in aggregated_metrics:
                     buckets = METRICS[mname].expr.eval(series.rows, period, vars_for_eval)
                     agg_data[mname] = buckets
@@ -757,27 +773,13 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                                     or split_arg.startswith("commenter:")))):
         log.error("adoption_rate requires --split reviewer:<slug> or --split commenter:<slug>")
         sys.exit(1)
-    # Variables exposed to DSL expressions (Var("state") resolves from here).
-    # `_`-prefixed keys are context for @-source fetchers (pa/sources.py).
-    dsl_vars = {
-        "state": state,
-        "author": author_arg,
-        "judge_model": resolve_judge_model(getattr(args, "judge_model", None), cfg),
-        "reviewer_slug": (split_arg.split(":", 1)[1]
-                          if split_arg and split_arg.startswith("reviewer:") else None),
-        "commenter_slug": (split_arg.split(":", 1)[1]
-                           if split_arg and split_arg.startswith("commenter:") else None),
-        "_conn": conn,
-        "_since_ts": since_ts,
-        "_until_ts": until_ts,
-        "_repo_ids": all_repo_ids,
-    }
-
-    # All raw PR rows (across all repos) — wrapped @pr source pulls them from
-    # dsl_vars["_pr_rows"]; legacy direct-eval paths still receive them as the
-    # top-level argument to eval_series.
+    # All raw PR rows (across all repos) — wrapped @pr source reads them from
+    # dsl_vars["_pr_rows"]; non-source paths still get them as the row arg.
     all_rows = [r for rl in raw_per_repo.values() for r in rl]
-    dsl_vars["_pr_rows"] = all_rows
+    dsl_vars = _build_dsl_vars(
+        args, cfg, conn=conn, pr_rows=all_rows,
+        since_ts=since_ts, until_ts=until_ts, repo_ids=all_repo_ids,
+    )
 
     for metric_name in requested_metrics:
         mdef = METRICS[metric_name]
