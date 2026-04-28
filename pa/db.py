@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS pr_comments (
     line INTEGER,
     line_type TEXT,
     file_type TEXT,
+    -- Bitbucket commentAnchor commit hashes (NULL for general comments).
+    -- Captured at comment time; if anchor_to_hash is no longer reachable from
+    -- the PR's current source-branch HEAD, the comment was orphaned by a
+    -- force-push (and Bitbucket UI shows it under "Other comments").
+    anchor_from_hash TEXT,
+    anchor_to_hash TEXT,
     FOREIGN KEY(repo_id, pr_id) REFERENCES pull_requests(repo_id, pr_id)
 );
 CREATE INDEX IF NOT EXISTS idx_comments_author ON pr_comments(author);
@@ -153,6 +159,13 @@ def open_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE pr_comments ADD COLUMN dg_hash TEXT")
         conn.execute("ALTER TABLE pr_comments ADD COLUMN dg_run TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_dg_hash ON pr_comments(dg_hash)")
+
+    # Migrate: add commentAnchor commit hash columns if missing
+    try:
+        conn.execute("SELECT anchor_to_hash FROM pr_comments LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE pr_comments ADD COLUMN anchor_from_hash TEXT")
+        conn.execute("ALTER TABLE pr_comments ADD COLUMN anchor_to_hash TEXT")
 
     # Migrate: merge_analysis PK (comment_id, judge_model) → (comment_id, judge_model, analyzer_version)
     try:
@@ -258,8 +271,9 @@ def insert_comment(
         """INSERT OR REPLACE INTO pr_comments
            (id, repo_id, pr_id, parent_id, author, text, created_date, updated_date,
             severity, state, file_path, line, line_type, file_type,
+            anchor_from_hash, anchor_to_hash,
             dg_gen, dg_hash, dg_run)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             comment["id"],
             repo_id,
@@ -275,6 +289,8 @@ def insert_comment(
             anchor.get("line") if anchor else None,
             anchor.get("lineType") if anchor else None,
             anchor.get("fileType") if anchor else None,
+            anchor.get("fromHash") if anchor else None,
+            anchor.get("toHash") if anchor else None,
             dg["gen"] if dg else None,
             dg["hash"] if dg else None,
             dg["run"] if dg else None,

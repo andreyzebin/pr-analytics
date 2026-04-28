@@ -349,6 +349,10 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
     if repo_ids:
         q += f" AND c.repo_id IN ({','.join('?' * len(repo_ids))})"
         params.extend(repo_ids)
+    only_comment_id = getattr(args, "comment_id", None)
+    if only_comment_id is not None:
+        q += " AND c.id = ?"
+        params.append(only_comment_id)
 
     q += " ORDER BY pr.closed_date, c.id"
     if batch_size:

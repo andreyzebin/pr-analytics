@@ -296,6 +296,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Print full prompt and response for each comment")
     p.add_argument("--force", action="store_true",
                    help="Re-analyze all comments, ignoring cached results")
+    p.add_argument("--comment-id", type=int, default=None, dest="comment_id",
+                   help="Analyze only the given pr_comments.id (debugging single comment)")
     p.add_argument("--dry-run", action="store_true", dest="dry_run")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
