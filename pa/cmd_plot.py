@@ -309,21 +309,32 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         since_arg = getattr(args, "since", None)
         until_arg = getattr(args, "until", None)
         passthrough_pairs = []
-        # Pass through args that are NOT absorbed into the DSL
-        for cli_flag, value in [
-            ("--type",       getattr(args, "plot_type", None)),
-            ("--state",      getattr(args, "state", None)),
-            ("--output",     getattr(args, "output", None)),
-            ("--projects",   getattr(args, "projects", None)),
-            ("--repos",      getattr(args, "repos", None)),
-            ("--repos-file", getattr(args, "repos_file", None)),
-            ("--author",     getattr(args, "author", None)),
-            ("--judge-model", getattr(args, "judge_model", None)),
-            ("--db",         getattr(args, "db", None)),
-            ("--layout",     getattr(args, "layout", None)),
+        # Pass through args that are NOT absorbed into the DSL.
+        # Skip values that match argparse defaults so the emitted command
+        # stays minimal (and cleaner to copy/paste).
+        defaults = {
+            "plot_type": "box",            # but we want json/etc passed through
+            "output":    "output/chart.png",
+            "layout":    "stack",
+            "state":     "MERGED",
+        }
+        for cli_flag, attr, value in [
+            ("--type",        "plot_type",   getattr(args, "plot_type", None)),
+            ("--state",       "state",       getattr(args, "state", None)),
+            ("--output",      "output",      getattr(args, "output", None)),
+            ("--projects",    "projects",    getattr(args, "projects", None)),
+            ("--repos",       "repos",       getattr(args, "repos", None)),
+            ("--repos-file",  "repos_file",  getattr(args, "repos_file", None)),
+            ("--author",      "author",      getattr(args, "author", None)),
+            ("--judge-model", "judge_model", getattr(args, "judge_model", None)),
+            ("--db",          "db",          getattr(args, "db", None)),
+            ("--layout",      "layout",      getattr(args, "layout", None)),
         ]:
-            if value:
-                passthrough_pairs.append(f"{cli_flag} {_sh_quote(str(value))}")
+            if not value:
+                continue
+            if defaults.get(attr) == value:
+                continue  # default — skip
+            passthrough_pairs.append(f"{cli_flag} {_sh_quote(str(value))}")
 
         # Bake CLI-provided values into the DSL so the emitted command is
         # self-contained (no $reviewer_slug / $state placeholders).
@@ -826,7 +837,12 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             "buckets": sorted_buckets,
             "metrics": [
                 {
-                    "name": mname,
+                    # For --metric / --dsl ad-hoc metrics, the user-supplied
+                    # label is the canonical identifier; fall back to the
+                    # registry slug for built-in metrics.
+                    "name": (METRICS[mname].label
+                             if mname.startswith(("_ad_hoc_", "_full_dsl_"))
+                             else mname),
                     "label": METRICS[mname].label,
                     "unit": METRICS[mname].unit,
                     "plot_kind": METRICS[mname].plot_kind,
