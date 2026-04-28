@@ -229,6 +229,7 @@ openssl pkcs12 -in .\client.p12 -out .\client.pem -nodes -passin pass:<password>
 | `box` | Boxplot cycle time по серии (по умолчанию) |
 | `trend` | Линейный/столбчатый график метрик по времени |
 | `points` | Отсортированный список значений в stdout, файл не создаётся |
+| `json` | Машинно-читаемые бакеты `{period, state, metrics: [{name, series: [{label, buckets}]}]}` — для тестов и пайплайнов |
 
 **Доступные метрики (`--metrics`, только для `trend`):**
 
@@ -237,8 +238,9 @@ openssl pkcs12 -in .\client.p12 -out .\client.pem -nodes -passin pass:<password>
 | `cycle_time` | лог | Медианное время PR от создания до закрытия (часы) |
 | `acceptance_rate` | линейная | MERGED / (MERGED + DECLINED) × 100% |
 | `throughput` | линейная | Количество смерженных PR за период |
-| `total_prs` | линейная | Всего PR (MERGED + DECLINED) за период |
-| `total_repos` | bar | Активных репозиториев за период (уникальные репы с MERGED PR, по `created_date`). С `--split reviewer/commenter` — "+агент" = репы где ≥1 PR с агентом, "-агент" = репы с 0 PR с агентом (для отслеживания adoption) |
+| `total_prs` | линейная | Число PR в выбранном `--state` за период |
+| `total_repos` | bar | Активных репозиториев за период (уникальные репы с MERGED PR, по `created_date`). В строке `total=` под графиком — уникальные репы за весь диапазон (union по периодам), а не сумма понедельных. |
+| `adoption_rate` | линейная | % PR с агентом от всех PR за период (требует `--split reviewer:<slug>` или `commenter:<slug>`). С `--group-by project` — отдельная линия на проект, видна динамика adoption по неймспейсам. |
 | `time_to_first_comment` | лог | Медианное время до первого комментария от не-автора (часы) |
 | `agent_comments` | bar | Суммарное число корневых замечаний AI-агента за период (требует `--author`) |
 | `feedback_rate` | линейная | % замечаний агента, на которые отреагировали (реакция или ответ), требует `--author` |
@@ -266,8 +268,9 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 - `cycle_time` = `median((closed_date - created_date) / 3600000)` часы, по PR с `state=<--state>`
 - `acceptance_rate` = `count(MERGED) / count(MERGED + DECLINED) × 100`
 - `throughput` = `count(MERGED)` за период
-- `total_prs` = `count(MERGED + DECLINED)` за период
-- `total_repos` = `count(DISTINCT repo_id)` среди MERGED PR с `created_date` в периоде. При `--split reviewer:<slug>` / `commenter:<slug>` "-" серия исключает репы, имеющие ≥1 PR с агентом в этом же периоде — чтобы видеть реальную adoption без дублей
+- `total_prs` = `count(state=<--state>)` за период
+- `total_repos` = `count(DISTINCT repo_id)` среди MERGED PR с `created_date` в периоде
+- `adoption_rate` = `PRs_with_agent / PRs_total × 100%` за период (per group/project, по `created_date`)
 - `time_to_first_comment` = `median(first_non_author_comment_date - created_date)` часы
 - `agent_comments` = `sum(root comments by --author)` за период
 - `feedback_rate` = `comments_with_reactions_or_replies / total_comments × 100`
@@ -385,13 +388,13 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 | `--judge-model` | LLM-модель судьи (default из конфига, см. `judge.model`) |
 | `--output` | `.png`, `.svg` или `.html` (интерактивный plotly, для `trend`) |
 
-**Режимы `--split` (по критерию PR):**
+**Режимы `--split` (repo-level — все PR одного репа уходят в одну когорту):**
 
 | Значение | Описание |
 |---|---|
-| `reviewer:<slug>` | Два когорта: PR с аккаунтом в ревьюверах / без |
-| `commenter:<slug>` | Два когорта: PR с хотя бы одним комментарием от аккаунта / без |
-| `total[:<label>]` | Все репозитории в одну агрегированную серию |
+| `reviewer:<slug>` | «+» = репы где ≥1 PR (в `--state`) с `<slug>` в ревьюверах; «−» = репы со строго 0 такими PR. ВСЕ PR соответствующих репов идут в свою когорту. |
+| `commenter:<slug>` | «+» = репы где ≥1 PR (в `--state`) с комментарием от `<slug>`; «−» = репы со строго 0. |
+| `total[:<label>]` | Все репозитории в одну агрегированную серию. |
 
 Без `--split` — одна серия на репозиторий.
 
@@ -401,40 +404,147 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 |---|---|
 | `project` | По одной серии на каждый проект/неймспейс |
 
-Можно комбинировать: `--split reviewer:agent --group-by project` → N проектов × 2 серии (+/- agent), лейблы `"MCPN / + agent"`. При этом для `total_repos` exclusion "-agent исключает репы-с-agent" работает внутри каждой группы (один репо ∈ одному проекту).
+Можно комбинировать: `--split reviewer:agent --group-by project` → N проектов × 2 серии (+/− agent), лейблы `"MCPN / + agent"`. Каждый реп принадлежит одному проекту, так что разделение и группировка не пересекаются.
 
 Cycle Time и Time to First Comment используют **логарифмическую** ось Y. Все trend-метрики группируются по `closed_date`.
 
-**Добавить новую метрику** (DORA, PDLC и др.): написать функцию `(rows, period, state) -> dict[str, float]` и добавить запись в `METRICS` в `pa/metrics.py`. Рендер-слой менять не нужно.
+**Добавить новую метрику:** объявить `MetricDef(expr=<DSL-выражение>)` в `pa/metrics.py`. Рендер и фильтрация — общие для всех метрик.
+
+#### DSL метрик
+
+Все метрики описываются единым декларативным DSL (см. `pa/dsl.py`). CLI-флаги `--state`/`--period`/`--since`/`--until`/`--split`/`--group-by` автоматически оборачиваются вокруг выражения метрики; команду можно увидеть целиком через `--explain`.
+
+**Структура (outermost → innermost):**
+
+```
+period(week|month,
+  range(since=YYYY-MM-DD, until=YYYY-MM-DD,
+    @source(                       # @pr | @comments | @analysis | @merge
+      group(project_key,           # из --group-by
+        split(reviewer:slug,       # из --split (repo-level cohort)
+          <inner aggregation>      # count / count_distinct / sum / median / ratio
+        )
+      )
+    )
+  )
+)
+```
+
+**Аггрегаторы:**
+
+| Запись | Семантика |
+|---|---|
+| `count(<filter>?, @<bucket>?)` | Число строк под фильтром |
+| `count_distinct(field, <filter>?, @<bucket>?)` | Уникальные значения `field` |
+| `sum(<expr>, <filter>?, @<bucket>?)` | Сумма поля или выражения над полями |
+| `median(<expr>, <filter>?, @<bucket>?)` | Медиана |
+| `ratio(num, den)` | `num / den * 100` (sugar для `BinOp` `*` `/` `Const(100)`) |
+| `(a + b)`, `(a * b)`, `(a / b)`, `(a - b)` | Поэлементная арифметика по бакетам |
+
+**Фильтры:**
+
+| Запись | Семантика |
+|---|---|
+| `field='value'` / `field=$var` | Равенство |
+| `field in ['a', 'b']` | Принадлежность литералу-списку |
+| `value in field` | Membership в массивном поле строки (`reviewers`, `commenters`) |
+| `field is null` / `field is not null` | NULL-проверки |
+| `(a and b)`, `(a or b)`, `not a` | Булева логика |
+
+**Переменные** (резолвятся из CLI):
+- `$state` ← `--state`
+- `$author` ← `--author`
+- `$judge_model` ← `--judge-model`
+- `$reviewer_slug`/`$commenter_slug` ← из `--split reviewer:slug`/`commenter:slug`
+
+**Источники (`@source`):**
+
+| Источник | Таблица (с join'ами) | Поля |
+|---|---|---|
+| `@pr` | `pull_requests` (default, augmented) | state, reviewers, commenters, author, created_date, closed_date, project_key, repo_id, agent_comment_count, first_comment_date |
+| `@comments` | `pr_comments` JOIN PR | author, parent_id, file_path, severity, has_reaction, has_reply, closed_date, repo_id, pr_id |
+| `@analysis` | `comment_analysis` JOIN comments JOIN PR | verdict (yes/no/unclear), judge_model, author, closed_date |
+| `@merge` | `merge_analysis` (latest version) JOIN comments JOIN PR | verdict (YES/PARTIAL/NO), analyzer_version, author, closed_date |
+
+**`--explain`** — показывает DSL для каждой метрики в команде (без обращения к БД):
+
+```bash
+plot --explain --metrics adoption_rate --period week --since 2026-04-01 --split reviewer:agent --group-by project
+# →
+# adoption_rate  (Adoption Rate, %, line)
+period(week,
+  range(since=2026-04-01,
+    @pr(
+      group(project_key,
+        ratio(
+          count((state=$state and ($reviewer_slug in reviewers or $commenter_slug in commenters)), @created_date),
+          count(state=$state, @created_date),
+        ),
+      )
+    ),
+  ),
+)
+```
+
+**`--metric "label=<expr>"`** — ad-hoc метрика поверх auto-wrap:
+
+```bash
+plot --since 2026-04-01 --period week --group-by project --type json \
+  --metric "Decline Rate=ratio(count(state='DECLINED'), count(state in ['MERGED','DECLINED']))"
+```
+
+**`--dsl "label=<full-dsl>"`** — полный DSL без auto-wrap (метрика подаётся уже обёрнутой со всеми `period`/`range`/`@source`/`group`/`split`):
+
+```bash
+plot --type json --metrics '' \
+  --dsl "merged_count=period(week, @pr(count(state='MERGED')))"
+```
+
+**`--new-dsl`** — печатает эквивалентную команду текущего вызова в форме `--dsl` (для шаринга, скриптов, тонкой настройки):
+
+```bash
+plot --since 2026-04-01 --period week --metrics adoption_rate --split reviewer:agent --group-by project --new-dsl
+# → выводит готовую к запуску plot ... --dsl "adoption_rate=..." команду
+```
 
 ---
 
-### `find-repos` — репозитории по ревьюверу или комментатору
+### `find-repos` — репозитории с PR по фильтрам
 
-Возвращает все репозитории, где пользователь был формальным ревьювером или оставил комментарий.
+Возвращает репозитории, в которых есть PR, удовлетворяющие фильтрам, с числом таких PR в каждом репо. Все фильтры опциональны — без них вернутся все репы со всеми PR в кеше.
 
 ```bash
-# По формальному ревьюверу
+# Все репы с MERGED PR за период
 .venv/bin/python pr_analytics.py find-repos \
-  --reviewer ivan.ivanov \
-  --state MERGED \
-  --since 2026-01-01 \
+  --since 2026-01-01 --state MERGED
+
+# По формальному ревьюверу (например, AI-агент)
+.venv/bin/python pr_analytics.py find-repos \
+  --reviewer ai-review-bot --state MERGED --since 2026-01-01
+
+# По наличию комментариев — записать список в файл для plot --repos-file
+.venv/bin/python pr_analytics.py find-repos \
+  --commenter ai-review-bot --state MERGED --since 2026-01-01 \
   --output repos.txt
 
-# По наличию комментариев (например, AI-агент)
+# Сузить по проектам, отдать csv
 .venv/bin/python pr_analytics.py find-repos \
-  --commenter ai-review-bot \
-  --state MERGED \
-  --since 2026-01-01 \
-  --output repos.txt
+  --projects MCPN,OPPL --state MERGED --since 2026-01-01 \
+  --format csv
 ```
 
 | Параметр | Описание |
 |---|---|
-| `--reviewer` | Slug пользователя в формальном списке ревьюверов |
-| `--commenter` | Slug пользователя, оставившего хотя бы один комментарий |
+| `--repos` / `--projects` / `--repos-file` | Фильтр по репозиториям |
+| `--author` | Автор PR |
+| `--reviewer` | Slug в формальном списке ревьюверов |
+| `--commenter` | Slug, оставивший хотя бы один комментарий |
+| `--state` | `MERGED`, `DECLINED`, `OPEN` |
+| `--since` / `--until` | Диапазон по дате создания PR |
+| `--format` | `table` (по умолчанию), `csv`, `json` |
+| `--output` | Записать **список `PROJ/repo`** (без счётчика) — совместимо с `plot --repos-file` |
 
-Вывод — `PROJ/repo`, по одному в строке. Файл совместим с `plot --repos-file`.
+Без `--output` печатает таблицу `project | repo | prs` с числом PR на репо. С `--output` — простой список `PROJ/repo` по одному в строке.
 
 ---
 

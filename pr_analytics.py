@@ -79,7 +79,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--until", help="End date (YYYY-MM-DD)")
     p.add_argument("--state", default="MERGED", choices=["MERGED", "DECLINED", "OPEN"])
     p.add_argument("--reviewer", help="include:<slug> or exclude:<slug>  (filters dataset)")
-    p.add_argument("--type", default="box", choices=["box", "points", "trend"],
+    p.add_argument("--explain", action="store_true",
+                   help="Print DSL expression for each requested metric and exit (no DB access)")
+    p.add_argument("--metric", action="append", default=[], dest="ad_hoc_metrics",
+                   help="Ad-hoc metric: 'label=<dsl-expr>' (repeatable). "
+                        "Auto-wrapped with period/range/@pr/group/split from CLI flags. "
+                        "Example: --metric 'Decline Rate=ratio(count(state=\"DECLINED\"), count())'")
+    p.add_argument("--dsl", action="append", default=[], dest="full_dsl",
+                   help="Fully-wrapped DSL metric: 'label=<dsl>' (repeatable). "
+                        "No auto-wrap — the DSL must include period/range/group/split/@source "
+                        "explicitly. Pair with --new-dsl on an existing command to generate "
+                        "the equivalent --dsl form.")
+    p.add_argument("--new-dsl", action="store_true",
+                   help="Translate this CLI command to the equivalent --dsl form and print "
+                        "a runnable command. Pipes everything else (--type, --output, --projects) "
+                        "through unchanged.")
+    p.add_argument("--type", default="box", choices=["box", "points", "trend", "json"],
                    dest="plot_type",
                    help="Chart type: box (default), points (raw values to stdout), trend (over time)")
     p.add_argument("--period", default="month", choices=["week", "month"],
@@ -167,13 +182,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
     # ── find-repos ─────────────────────────────────────────────────────────────
-    p = sub.add_parser("find-repos", help="Find repos where user was a reviewer or commenter")
-    p.add_argument("--reviewer", help="Find repos where slug is in formal reviewers list")
-    p.add_argument("--commenter", help="Find repos where slug left at least one comment")
+    p = sub.add_parser("find-repos", help="List repos with PRs matching filters")
+    p.add_argument("--repos", help="Comma-separated PROJ/repo entries")
+    p.add_argument("--projects", help="Comma-separated project keys")
+    p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
+    p.add_argument("--author", help="PR author slug")
+    p.add_argument("--reviewer", help="Slug in formal reviewers list")
+    p.add_argument("--commenter", help="Slug who left at least one comment")
     p.add_argument("--since", help="Start date (YYYY-MM-DD)")
     p.add_argument("--until", help="End date (YYYY-MM-DD)")
     p.add_argument("--state", choices=["MERGED", "DECLINED", "OPEN"])
-    p.add_argument("--output", help="Output file path")
+    p.add_argument("--format", choices=["table", "csv", "json"], default="table")
+    p.add_argument("--output", help="Output file path (writes plain PROJ/repo list)")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
     # ── find-prs ───────────────────────────────────────────────────────────────

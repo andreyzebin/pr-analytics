@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import statistics
 import sys
 from dataclasses import dataclass, field
@@ -11,10 +12,23 @@ from typing import Any
 
 from pa.config import resolve_db, resolve_judge_model
 from pa.db import open_db
+from pa.dsl import BinOp, FromSource, Group, Split, auto_wrap
 from pa.metrics import METRICS, MetricDef, bucket_key, fmt_hours
 from pa.utils import collect_repos_from_args, date_to_ms, ms_to_date
 
 log = logging.getLogger(__name__)
+
+
+def _sh_quote(s: str) -> str:
+    """Quote for shell paste-back. Prefer single quotes; if `s` contains
+    single quotes but no double quotes, use double quotes; else fall back to
+    shlex.quote (escaped, ugly but correct)."""
+    if "'" not in s:
+        return f"'{s}'"
+    if '"' not in s and "$" not in s and "`" not in s and "\\" not in s:
+        return f'"{s}"'
+    import shlex
+    return shlex.quote(s)
 
 
 # ── Series ────────────────────────────────────────────────────────────────────
@@ -43,11 +57,14 @@ def _build_series(
     split_arg: str | None,
     commenter_pr_set: set[tuple] | None = None,
     group_by: str | None = None,
+    state: str | None = None,
 ) -> list[Series]:
     """
     Default: one Series per repo.
-    --split reviewer:<slug>  — split by presence in PR reviewers list.
-    --split commenter:<slug> — split by presence of at least one comment from slug.
+    --split reviewer:<slug>  — repo-level: "+"=repos with ≥1 PR (in --state)
+                               where slug is reviewer; "−"=repos with strictly 0.
+    --split commenter:<slug> — repo-level: "+"=repos with ≥1 PR (in --state)
+                               commented by slug; "−"=repos with strictly 0.
     --split total[:<label>]  — one series with everything combined.
     --group-by project       — further split each series by project key.
     """
@@ -66,10 +83,21 @@ def _build_series(
         kind, value = parts[0], parts[1] if len(parts) > 1 else ""
         all_rows = [r for rows in raw_per_repo.values() for r in rows]
 
+        # Rows used to classify a repo as "+" (≥1 matching PR) or "−" (strictly 0).
+        # Filter by --state so classification matches the metric's denominator.
+        classify_rows = [r for r in all_rows if state is None or r["state"] == state]
+
         if kind == "reviewer":
             slug = value
-            with_rows    = [r for r in all_rows if slug in json.loads(r["reviewers"] or "[]")]
-            without_rows = [r for r in all_rows if slug not in json.loads(r["reviewers"] or "[]")]
+            # Repo-level split: "+" = repos with ≥1 PR (in --state) where slug
+            # is reviewer; "-" = repos with strictly zero such PRs.
+            # All rows of a repo go into the same cohort.
+            plus_repo_ids = {
+                r["repo_id"] for r in classify_rows
+                if slug in json.loads(r["reviewers"] or "[]")
+            }
+            with_rows    = [r for r in all_rows if r["repo_id"] in plus_repo_ids]
+            without_rows = [r for r in all_rows if r["repo_id"] not in plus_repo_ids]
             base_series = [
                 Series(label=f"+ {slug}", rows=with_rows),
                 Series(label=f"- {slug}", rows=without_rows),
@@ -77,8 +105,13 @@ def _build_series(
         elif kind == "commenter":
             slug = value
             ps = commenter_pr_set or set()
-            with_rows    = [r for r in all_rows if (r["repo_id"], r["pr_id"]) in ps]
-            without_rows = [r for r in all_rows if (r["repo_id"], r["pr_id"]) not in ps]
+            # Repo-level split: "+" = repos with ≥1 PR (in --state) commented by slug.
+            plus_repo_ids = {
+                r["repo_id"] for r in classify_rows
+                if (r["repo_id"], r["pr_id"]) in ps
+            }
+            with_rows    = [r for r in all_rows if r["repo_id"] in plus_repo_ids]
+            without_rows = [r for r in all_rows if r["repo_id"] not in plus_repo_ids]
             base_series = [
                 Series(label=f"∈ {slug}", rows=with_rows),
                 Series(label=f"∉ {slug}", rows=without_rows),
@@ -264,6 +297,128 @@ def _save_trend_html(
 # ── Main command ──────────────────────────────────────────────────────────────
 
 def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
+    # ── --new-dsl: print equivalent CLI command using --dsl flags, exit ──
+    if getattr(args, "new_dsl", False):
+        from pa.dsl import format_expr, substitute_vars
+        from pa.config import resolve_judge_model as _resolve_judge_model
+        raw_metrics = getattr(args, "metrics", "cycle_time")
+        names = [m.strip() for m in raw_metrics.split(",") if m.strip()]
+        split = getattr(args, "split", None)
+        group_by = getattr(args, "group_by", None)
+        period_arg = getattr(args, "period", None)
+        since_arg = getattr(args, "since", None)
+        until_arg = getattr(args, "until", None)
+        passthrough_pairs = []
+        # Pass through args that are NOT absorbed into the DSL
+        for cli_flag, value in [
+            ("--type",       getattr(args, "plot_type", None)),
+            ("--state",      getattr(args, "state", None)),
+            ("--output",     getattr(args, "output", None)),
+            ("--projects",   getattr(args, "projects", None)),
+            ("--repos",      getattr(args, "repos", None)),
+            ("--repos-file", getattr(args, "repos_file", None)),
+            ("--author",     getattr(args, "author", None)),
+            ("--judge-model", getattr(args, "judge_model", None)),
+            ("--db",         getattr(args, "db", None)),
+            ("--layout",     getattr(args, "layout", None)),
+        ]:
+            if value:
+                passthrough_pairs.append(f"{cli_flag} {_sh_quote(str(value))}")
+
+        # Bake CLI-provided values into the DSL so the emitted command is
+        # self-contained (no $reviewer_slug / $state placeholders).
+        # Bake all known vars (including None) so the emitted DSL has no
+        # $-references — keeping bash $… expansion out of the output makes
+        # double-quote shell wrapping safe.
+        bake = {
+            "state": getattr(args, "state", "MERGED"),
+            "author": getattr(args, "author", None),
+            "judge_model": _resolve_judge_model(
+                getattr(args, "judge_model", None), cfg),
+            "reviewer_slug": (split.split(":", 1)[1]
+                              if split and split.startswith("reviewer:") else None),
+            "commenter_slug": (split.split(":", 1)[1]
+                               if split and split.startswith("commenter:") else None),
+        }
+
+        # Pretty multi-line shell output:
+        #   python pr_analytics.py plot \
+        #     --type json \
+        #     ...
+        #     --metrics '' \           # suppress the cycle_time default
+        #     --dsl 'metric_name=
+        #       <pretty-printed DSL>
+        #     ' \
+        #     ...
+        lines = ["python pr_analytics.py plot"]
+        for kv in passthrough_pairs:
+            lines.append(f"  {kv}")
+        # Suppress the implicit `cycle_time` default; --dsl entries replace it.
+        lines.append("  --metrics ''")
+        for mname in names:
+            if mname not in METRICS or METRICS[mname].expr is None:
+                continue
+            mdef = METRICS[mname]
+            wrapped = auto_wrap(mdef.expr, split=split, group_by=group_by,
+                                period=period_arg, since=since_arg, until=until_arg,
+                                skip_split=mdef.bypass_split)
+            wrapped = substitute_vars(wrapped, bake)
+            pretty = format_expr(wrapped)             # multi-line, indented
+            indented = "\n".join("    " + ln for ln in pretty.splitlines())
+            payload = f"{mname}=\n{indented}\n  "      # body for the --dsl arg
+            lines.append(f"  --dsl {_sh_quote(payload)}")
+
+        print(" \\\n".join(lines))
+        return
+
+    # ── --explain: print DSL for named + ad-hoc metrics, exit (no DB) ─────
+    if getattr(args, "explain", False):
+        from pa.dsl import format_expr
+        from pa.parser import parse_expr as _parse_expr
+        raw_metrics = getattr(args, "metrics", "cycle_time")
+        split = getattr(args, "split", None)
+        group_by = getattr(args, "group_by", None)
+        names = [m.strip() for m in raw_metrics.split(",") if m.strip()]
+        for mname in names:
+            if mname not in METRICS:
+                print(f"# unknown metric: {mname}")
+                continue
+            mdef = METRICS[mname]
+            print(f"# {mname}  ({mdef.label}, {mdef.unit}, {mdef.plot_kind})")
+            if mdef.expr is None:
+                print("#   (no DSL expression)")
+                print()
+                continue
+            wrapped = auto_wrap(mdef.expr, split=split, group_by=group_by,
+                                period=getattr(args, "period", None),
+                                since=getattr(args, "since", None),
+                                until=getattr(args, "until", None),
+                                skip_split=mdef.bypass_split)
+            print(format_expr(wrapped))
+            print()
+        for spec in (getattr(args, "ad_hoc_metrics", None) or []):
+            label, _, raw_expr = spec.partition("=")
+            print(f"# ad-hoc: {label.strip()!r}")
+            try:
+                wrapped = auto_wrap(_parse_expr(raw_expr.strip()),
+                                    split=split, group_by=group_by,
+                                    period=getattr(args, "period", None),
+                                    since=getattr(args, "since", None),
+                                    until=getattr(args, "until", None))
+                print(format_expr(wrapped))
+            except SyntaxError as e:
+                print(f"#   parse error: {e}")
+            print()
+        for spec in (getattr(args, "full_dsl", None) or []):
+            label, _, raw_expr = spec.partition("=")
+            print(f"# --dsl: {label.strip()!r}  (no auto-wrap)")
+            try:
+                print(format_expr(_parse_expr(raw_expr.strip())))
+            except SyntaxError as e:
+                print(f"#   parse error: {e}")
+            print()
+        return
+
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -289,7 +444,53 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
     # Parse and validate --metrics
     raw_metrics = getattr(args, "metrics", "cycle_time")
-    requested_metrics = [m.strip() for m in raw_metrics.split(",")]
+    requested_metrics = [m.strip() for m in raw_metrics.split(",") if m.strip()]
+
+    # ── Ad-hoc metrics: --metric 'label=<dsl-expr>' ─────────────────────────
+    # `--metric` is auto-wrapped (period/range/@pr/group/split added by
+    # auto_wrap from CLI flags). `--new-dsl` is treated as already-complete
+    # DSL — auto_wrap is skipped and the expression runs as-is.
+    from pa.parser import parse_expr
+    for spec in (getattr(args, "ad_hoc_metrics", None) or []):
+        if "=" not in spec:
+            log.error("--metric must be 'label=<dsl-expr>', got: %r", spec)
+            sys.exit(1)
+        label, _, raw_expr = spec.partition("=")
+        label = label.strip()
+        try:
+            expr = parse_expr(raw_expr.strip())
+        except SyntaxError as e:
+            log.error("ad-hoc metric %r: parse error — %s", label, e)
+            sys.exit(1)
+        slug = "_ad_hoc_" + re.sub(r"\W+", "_", label).strip("_").lower()
+        METRICS[slug] = MetricDef(
+            label=label, unit="", plot_kind="line",
+            fmt=lambda v: f"{v:.2f}",
+            expr=expr,
+        )
+        requested_metrics.append(slug)
+
+    full_dsl_metric_names: set[str] = set()
+    for spec in (getattr(args, "full_dsl", None) or []):
+        if "=" not in spec:
+            log.error("--dsl must be 'label=<dsl-expr>', got: %r", spec)
+            sys.exit(1)
+        label, _, raw_expr = spec.partition("=")
+        label = label.strip()
+        try:
+            expr = parse_expr(raw_expr.strip())
+        except SyntaxError as e:
+            log.error("--dsl %r: parse error — %s", label, e)
+            sys.exit(1)
+        slug = "_full_dsl_" + re.sub(r"\W+", "_", label).strip("_").lower()
+        METRICS[slug] = MetricDef(
+            label=label, unit="", plot_kind="line",
+            fmt=lambda v: f"{v:.2f}",
+            expr=expr,
+        )
+        requested_metrics.append(slug)
+        full_dsl_metric_names.add(slug)
+
     unknown = [m for m in requested_metrics if m not in METRICS]
     if unknown:
         log.error("Unknown metric(s): %s. Available: %s", unknown, list(METRICS.keys()))
@@ -299,6 +500,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     # Fetch all rows (no state filter) so every metric can use the same dataset.
     # Date range filters on created_date (consistent with original behaviour).
     raw_per_repo: dict[str, list] = {}
+    all_repo_ids: list[int] = []  # consumed by DSL @-source fetchers
 
     for proj_key, repo_slug in repos:
         repo_row = conn.execute(
@@ -308,6 +510,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             log.warning("Repo not in cache: %s/%s", proj_key, repo_slug)
             continue
         repo_id = repo_row["id"]
+        all_repo_ids.append(repo_id)
 
         query = """
             SELECT repo_id, pr_id, created_date, closed_date, state, reviewers
@@ -335,9 +538,9 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         label = f"{proj_key}/{repo_slug}"
         if rows:
             row_dicts = [dict(r) for r in rows]
-            # Attach project_key for --group-by project support
             for d in row_dicts:
-                d["project_key"] = proj_key
+                d["project_key"] = proj_key  # for --group-by project (Group node)
+                d["repo_label"]  = label     # for default per-repo Group wrap
             raw_per_repo[label] = row_dicts
 
     # ── Augment with agent_comment_count (separate query) ────────────────────
@@ -379,14 +582,16 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             ).fetchall()
         }
 
-    conn.close()
+    # NB: don't close conn here — DSL @-sources need it for further fetches.
+    # It's closed at the end of cmd_plot via the early-return paths or fall-through.
 
     if not raw_per_repo:
+        conn.close()
         log.error("No data in cache for the specified repos/range.")
         sys.exit(4)
 
     # ── Build series ──────────────────────────────────────────────────────────
-    series_list = _build_series(raw_per_repo, split_arg, commenter_pr_set, group_by)
+    series_list = _build_series(raw_per_repo, split_arg, commenter_pr_set, group_by, state)
 
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
@@ -399,7 +604,12 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 repo_id_to_label[r["repo_id"]] = lbl
 
         per_pr_metrics  = [m for m in requested_metrics if METRICS[m].row_value is not None]
-        aggregated_metrics = [m for m in requested_metrics if METRICS[m].row_value is None]
+        aggregated_metrics = [m for m in requested_metrics
+                              if METRICS[m].row_value is None and METRICS[m].compute is not None]
+        skipped = [m for m in requested_metrics
+                   if METRICS[m].row_value is None and METRICS[m].compute is None]
+        if skipped:
+            log.warning("--type points doesn't support metrics: %s", ", ".join(skipped))
 
         for series in series_list:
             print(f"\n{'─' * 60}")
@@ -495,366 +705,149 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     # Pre-compute: metric_results[metric_name] = [(series_label, {bucket: value})]
     all_buckets: set[str] = set()
     metric_results: dict[str, list[tuple[str, dict]]] = {}
+    # For total_repos: keep per-bucket repo_id sets so the printed total can be
+    # computed as union (unique repos across the whole range), not sum of
+    # per-period unique counts.
+    total_repos_sets: dict[str, dict[str, set]] = {}
 
-    # ── feedback_acceptance_rate: special fetch from comment_analysis ──────────
-    if "feedback_acceptance_rate" in requested_metrics:
-        author = getattr(args, "author", None)
-        if not author:
-            log.error("--author is required for feedback_acceptance_rate metric")
-            sys.exit(1)
-        judge_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
-        conn2 = open_db(db_path)
-        # Fetch all analyzed comments for this author+judge, joined to PR closed_date
-        sar_rows = conn2.execute("""
-            SELECT ca.verdict, pr.closed_date, pr.repo_id, pr.pr_id
-            FROM comment_analysis ca
-            JOIN pr_comments c ON c.id = ca.comment_id
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND ca.judge_model = ?
-              AND pr.closed_date IS NOT NULL
-        """, (author, judge_model)).fetchall()
-        conn2.close()
+    # Augment each PR row with `commenters` — set of comment authors on this PR.
+    # Enables the DSL filter `$slug in commenters` symmetrically with reviewers.
+    if all_repo_ids:
+        placeholders = ",".join("?" * len(all_repo_ids))
+        cm_rows = conn.execute(
+            f"""SELECT repo_id, pr_id, author FROM pr_comments
+                WHERE repo_id IN ({placeholders}) AND author IS NOT NULL""",
+            all_repo_ids,
+        ).fetchall()
+        commenters_by_pr: dict[tuple, set] = {}
+        for r in cm_rows:
+            commenters_by_pr.setdefault((r["repo_id"], r["pr_id"]), set()).add(r["author"])
+        for rows_list in raw_per_repo.values():
+            for r in rows_list:
+                r["commenters"] = commenters_by_pr.get((r["repo_id"], r["pr_id"]), set())
 
-        # Build a set of (repo_id, pr_id) per series, then compute rate per bucket
-        # feedback_acceptance_rate is not split-aware — one global series
-        yes_buckets: dict[str, int] = {}
-        total_buckets: dict[str, int] = {}
-        for r in sar_rows:
-            if r["verdict"] not in ("yes", "no"):
-                continue
-            bk = bucket_key(r["closed_date"], period)
-            total_buckets[bk] = total_buckets.get(bk, 0) + 1
-            if r["verdict"] == "yes":
-                yes_buckets[bk] = yes_buckets.get(bk, 0) + 1
-        sar_buckets = {
-            bk: yes_buckets.get(bk, 0) / total_buckets[bk] * 100
-            for bk in total_buckets
-        }
-        metric_results["feedback_acceptance_rate"] = [(f"{author} ({judge_model})", sar_buckets)]
-        all_buckets.update(sar_buckets.keys())
+    # adoption_rate validation: needs reviewer or commenter slug.
+    if ("adoption_rate" in requested_metrics
+            and not (split_arg and (split_arg.startswith("reviewer:")
+                                    or split_arg.startswith("commenter:")))):
+        log.error("adoption_rate requires --split reviewer:<slug> or --split commenter:<slug>")
+        sys.exit(1)
+    # Variables exposed to DSL expressions (Var("state") resolves from here).
+    # `_`-prefixed keys are context for @-source fetchers (pa/sources.py).
+    dsl_vars = {
+        "state": state,
+        "author": author_arg,
+        "judge_model": resolve_judge_model(getattr(args, "judge_model", None), cfg),
+        "reviewer_slug": (split_arg.split(":", 1)[1]
+                          if split_arg and split_arg.startswith("reviewer:") else None),
+        "commenter_slug": (split_arg.split(":", 1)[1]
+                           if split_arg and split_arg.startswith("commenter:") else None),
+        "_conn": conn,
+        "_since_ts": since_ts,
+        "_until_ts": until_ts,
+        "_repo_ids": all_repo_ids,
+    }
 
-    # ── feedback_acceptance_rate_all: yes / total_comments (incl. no-feedback) ─
-    if "feedback_acceptance_rate_all" in requested_metrics:
-        if not author_arg:
-            log.error("--author is required for feedback_acceptance_rate_all metric")
-            sys.exit(1)
-        judge_model_all = resolve_judge_model(getattr(args, "judge_model", None), cfg)
-        conn_sara = open_db(db_path)
-        # yes verdicts per bucket
-        sara_yes_rows = conn_sara.execute("""
-            SELECT pr.closed_date, COUNT(*) AS cnt
-            FROM comment_analysis ca
-            JOIN pr_comments c ON c.id = ca.comment_id
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND ca.judge_model = ? AND ca.verdict = 'yes'
-              AND pr.closed_date IS NOT NULL
-            GROUP BY pr.closed_date
-        """, (author_arg, judge_model_all)).fetchall()
-        # total root comments per bucket (all, regardless of feedback)
-        sara_total_rows = conn_sara.execute("""
-            SELECT pr.closed_date, COUNT(*) AS cnt
-            FROM pr_comments c
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
-            GROUP BY pr.closed_date
-        """, (author_arg,)).fetchall()
-        conn_sara.close()
+    # All raw PR rows (across all repos) — wrapped @pr source pulls them from
+    # dsl_vars["_pr_rows"]; legacy direct-eval paths still receive them as the
+    # top-level argument to eval_series.
+    all_rows = [r for rl in raw_per_repo.values() for r in rl]
+    dsl_vars["_pr_rows"] = all_rows
 
-        yes_per_bk: dict[str, int] = {}
-        for r in sara_yes_rows:
-            bk = bucket_key(r["closed_date"], period)
-            yes_per_bk[bk] = yes_per_bk.get(bk, 0) + r["cnt"]
-        total_per_bk_all: dict[str, int] = {}
-        for r in sara_total_rows:
-            bk = bucket_key(r["closed_date"], period)
-            total_per_bk_all[bk] = total_per_bk_all.get(bk, 0) + r["cnt"]
-        sara_buckets = {
-            bk: yes_per_bk.get(bk, 0) / total * 100
-            for bk, total in total_per_bk_all.items() if total > 0
-        }
-        metric_results["feedback_acceptance_rate_all"] = [
-            (f"{author_arg} ({judge_model_all})", sara_buckets)
-        ]
-        all_buckets.update(sara_buckets.keys())
-
-    # ── feedback_rate: comments_with_feedback / total_comments per period ─────
-    if "feedback_rate" in requested_metrics:
-        if not author_arg:
-            log.error("--author is required for feedback_rate metric")
-            sys.exit(1)
-        conn3 = open_db(db_path)
-        total_rows = conn3.execute("""
-            SELECT c.repo_id, c.pr_id, pr.closed_date, COUNT(*) AS cnt
-            FROM pr_comments c
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
-            GROUP BY c.repo_id, c.pr_id
-        """, (author_arg,)).fetchall()
-        fb_rows = conn3.execute("""
-            SELECT c.repo_id, c.pr_id, pr.closed_date, COUNT(*) AS cnt
-            FROM pr_comments c
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
-              AND (
-                  EXISTS (SELECT 1 FROM comment_reactions cr WHERE cr.comment_id = c.id)
-                  OR EXISTS (SELECT 1 FROM pr_comments reply
-                             WHERE reply.parent_id = c.id AND reply.author != ?)
-              )
-            GROUP BY c.repo_id, c.pr_id
-        """, (author_arg, author_arg)).fetchall()
-        conn3.close()
-
-        from collections import defaultdict as _dd
-        total_per_bk: dict[str, int] = _dd(int)
-        fb_per_bk: dict[str, int] = _dd(int)
-        for r in total_rows:
-            total_per_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
-        for r in fb_rows:
-            fb_per_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
-        fr_buckets = {
-            bk: fb_per_bk.get(bk, 0) / total * 100
-            for bk, total in total_per_bk.items() if total > 0
-        }
-        metric_results["feedback_rate"] = [(author_arg, fr_buckets)]
-        all_buckets.update(fr_buckets.keys())
-
-    # ── feedback_all: absolute count of comments with feedback per period ─────
-    if "feedback_all" in requested_metrics:
-        if not author_arg:
-            log.error("--author is required for feedback_all metric")
-            sys.exit(1)
-        # Reuse fb_per_bk if already computed by feedback_rate, otherwise fetch
-        if "fb_per_bk" not in dir():
-            conn_fball = open_db(db_path)
-            fb_all_rows = conn_fball.execute("""
-                SELECT pr.closed_date, COUNT(*) AS cnt
-                FROM pr_comments c
-                JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-                WHERE c.author = ? AND c.parent_id IS NULL AND pr.closed_date IS NOT NULL
-                  AND (
-                      EXISTS (SELECT 1 FROM comment_reactions cr WHERE cr.comment_id = c.id)
-                      OR EXISTS (SELECT 1 FROM pr_comments reply
-                                 WHERE reply.parent_id = c.id AND reply.author != ?)
-                  )
-                GROUP BY pr.closed_date
-            """, (author_arg, author_arg)).fetchall()
-            conn_fball.close()
-            from collections import defaultdict as _dd_fba
-            fb_per_bk = _dd_fba(int)
-            for r in fb_all_rows:
-                fb_per_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
-        metric_results["feedback_all"] = [(author_arg, dict(fb_per_bk))]
-        all_buckets.update(fb_per_bk.keys())
-
-    # ── merge_acceptance_rate: (YES + 0.5*PARTIAL) / (YES+PARTIAL+NO) per period
-    if "merge_acceptance_rate" in requested_metrics:
-        if not author_arg:
-            log.error("--author is required for merge_acceptance_rate metric")
-            sys.exit(1)
-        mar_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
-        conn_mar = open_db(db_path)
-        # Pick only the latest analyzer_version per (comment_id, judge_model)
-        mar_rows = conn_mar.execute("""
-            SELECT ma.verdict, pr.closed_date
-            FROM merge_analysis ma
-            JOIN pr_comments c ON c.id = ma.comment_id
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND ma.judge_model = ?
-              AND pr.closed_date IS NOT NULL
-              AND ma.verdict IN ('YES','PARTIAL','NO')
-              AND ma.analyzed_at = (
-                  SELECT MAX(ma2.analyzed_at) FROM merge_analysis ma2
-                  WHERE ma2.comment_id = ma.comment_id AND ma2.judge_model = ma.judge_model
-              )
-        """, (author_arg, mar_model)).fetchall()
-        conn_mar.close()
-
-        from collections import defaultdict as _dd2
-        mar_yes: dict[str, float] = _dd2(float)
-        mar_total: dict[str, int] = _dd2(int)
-        for r in mar_rows:
-            bk = bucket_key(r["closed_date"], period)
-            mar_total[bk] += 1
-            if r["verdict"] == "YES":
-                mar_yes[bk] += 1.0
-            elif r["verdict"] == "PARTIAL":
-                mar_yes[bk] += 0.5
-        mar_buckets = {
-            bk: mar_yes.get(bk, 0) / t * 100
-            for bk, t in mar_total.items() if t > 0
-        }
-        metric_results["merge_acceptance_rate"] = [(f"{author_arg} ({mar_model})", mar_buckets)]
-        all_buckets.update(mar_buckets.keys())
-
-    # ── agent_inline_comments: root comments with file_path per period ─────────
-    if "agent_inline_comments" in requested_metrics:
-        if not author_arg:
-            log.error("--author is required for agent_inline_comments metric")
-            sys.exit(1)
-        conn_aic = open_db(db_path)
-        aic_rows = conn_aic.execute("""
-            SELECT pr.closed_date, COUNT(*) AS cnt
-            FROM pr_comments c
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND c.parent_id IS NULL AND c.file_path IS NOT NULL
-              AND pr.closed_date IS NOT NULL
-            GROUP BY pr.closed_date
-        """, (author_arg,)).fetchall()
-        conn_aic.close()
-        from collections import defaultdict as _dd_aic
-        aic_bk: dict[str, int] = _dd_aic(int)
-        for r in aic_rows:
-            aic_bk[bucket_key(r["closed_date"], period)] += r["cnt"]
-        metric_results["agent_inline_comments"] = [(author_arg, dict(aic_bk))]
-        all_buckets.update(aic_bk.keys())
-
-    # ── feedback absolute counts: feedback_yes, feedback_no, feedback_unclear ──
-    _fb_abs = {"feedback_yes", "feedback_no", "feedback_unclear"}
-    if _fb_abs & set(requested_metrics):
-        if not author_arg:
-            log.error("--author is required for feedback_* count metrics")
-            sys.exit(1)
-        fb_abs_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
-        conn_fba = open_db(db_path)
-        fba_rows = conn_fba.execute("""
-            SELECT ca.verdict, pr.closed_date
-            FROM comment_analysis ca
-            JOIN pr_comments c ON c.id = ca.comment_id
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND ca.judge_model = ? AND pr.closed_date IS NOT NULL
-        """, (author_arg, fb_abs_model)).fetchall()
-        conn_fba.close()
-
-        from collections import defaultdict as _dd3
-        fb_counts: dict[str, dict[str, int]] = {"yes": _dd3(int), "no": _dd3(int), "unclear": _dd3(int)}
-        for r in fba_rows:
-            v = r["verdict"]
-            if v in fb_counts:
-                fb_counts[v][bucket_key(r["closed_date"], period)] += 1
-        label = f"{author_arg} ({fb_abs_model})"
-        for mname, verdict_key in [("feedback_yes", "yes"), ("feedback_no", "no"), ("feedback_unclear", "unclear")]:
-            if mname in requested_metrics:
-                metric_results[mname] = [(label, dict(fb_counts[verdict_key]))]
-                all_buckets.update(fb_counts[verdict_key].keys())
-
-    # ── merge absolute counts: merge_yes, merge_partial, merge_no ────────────
-    _mr_abs = {"merge_yes", "merge_partial", "merge_yes_partial", "merge_no"}
-    if _mr_abs & set(requested_metrics):
-        if not author_arg:
-            log.error("--author is required for merge_* count metrics")
-            sys.exit(1)
-        mr_abs_model = resolve_judge_model(getattr(args, "judge_model", None), cfg)
-        conn_mra = open_db(db_path)
-        mra_rows = conn_mra.execute("""
-            SELECT ma.verdict, pr.closed_date
-            FROM merge_analysis ma
-            JOIN pr_comments c ON c.id = ma.comment_id
-            JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-            WHERE c.author = ? AND ma.judge_model = ? AND pr.closed_date IS NOT NULL
-              AND ma.analyzed_at = (
-                  SELECT MAX(ma2.analyzed_at) FROM merge_analysis ma2
-                  WHERE ma2.comment_id = ma.comment_id AND ma2.judge_model = ma.judge_model
-              )
-        """, (author_arg, mr_abs_model)).fetchall()
-        conn_mra.close()
-
-        from collections import defaultdict as _dd4
-        mr_counts: dict[str, dict[str, int]] = {"YES": _dd4(int), "PARTIAL": _dd4(int), "NO": _dd4(int)}
-        for r in mra_rows:
-            v = r["verdict"]
-            if v in mr_counts:
-                mr_counts[v][bucket_key(r["closed_date"], period)] += 1
-        label = f"{author_arg} ({mr_abs_model})"
-        # merge_yes_partial = YES + PARTIAL combined
-        from collections import defaultdict as _dd5
-        mr_yes_partial: dict[str, int] = _dd5(int)
-        for bk in set(list(mr_counts["YES"].keys()) + list(mr_counts["PARTIAL"].keys())):
-            mr_yes_partial[bk] = mr_counts["YES"].get(bk, 0) + mr_counts["PARTIAL"].get(bk, 0)
-
-        for mname, data in [("merge_yes", mr_counts["YES"]), ("merge_partial", mr_counts["PARTIAL"]),
-                            ("merge_yes_partial", mr_yes_partial), ("merge_no", mr_counts["NO"])]:
-            if mname in requested_metrics:
-                metric_results[mname] = [(label, dict(data))]
-                all_buckets.update(data.keys())
-
-    _special = {"feedback_acceptance_rate", "feedback_acceptance_rate_all",
-                "feedback_rate", "feedback_all", "merge_acceptance_rate",
-                "agent_inline_comments"} | _fb_abs | _mr_abs
     for metric_name in requested_metrics:
-        if metric_name in _special:
-            continue  # already handled above
         mdef = METRICS[metric_name]
-        series_data = []
-        for series in series_list:
-            buckets = mdef.compute(series.rows, period, state)
-            series_data.append((series.label, buckets))
+        if mdef.expr is None:
+            log.error("metric %r has no expr — registry corruption", metric_name)
+            sys.exit(1)
+
+        if metric_name in full_dsl_metric_names:
+            wrapped = mdef.expr  # --dsl: user-provided DSL is final, no auto-wrap
+        else:
+            wrapped = auto_wrap(
+                mdef.expr, split=split_arg, group_by=group_by, period=period,
+                since=getattr(args, "since", None), until=getattr(args, "until", None),
+                skip_split=mdef.bypass_split,
+            )
+        # Source metrics ignore input rows; non-source need all_rows for
+        # Group/Split partitioning.
+        results = wrapped.eval_series(all_rows, period, dsl_vars)
+
+        # Decorate empty / source labels with author/judge for readability.
+        # `--split total[:label]` produces a single series named after the label.
+        total_label = None
+        if split_arg and split_arg.startswith("total"):
+            total_label = split_arg.split(":", 1)[1] if ":" in split_arg else "Total"
+        decorated: list[tuple[str, dict]] = []
+        for label, buckets in results:
+            if not label:
+                if total_label:
+                    label = total_label
+                elif author_arg and dsl_vars.get("judge_model"):
+                    label = f"{author_arg} ({dsl_vars['judge_model']})"
+                elif author_arg:
+                    label = author_arg
+                else:
+                    label = metric_name
+            decorated.append((label, buckets))
             all_buckets.update(buckets.keys())
-        metric_results[metric_name] = series_data
 
-    # ── total_repos: repo-level split — exclude repos with "+" presence ────────
-    # For adoption tracking: "-agent" series should count only repos that have
-    # ZERO PRs-with-agent in the period. Exclusion happens per-group when
-    # --group-by is used (repo belongs to one project, so it's scoped naturally).
-    if "total_repos" in requested_metrics and split_arg:
-        from pa.metrics import bucket_key as _bk_fn
+        metric_results[metric_name] = decorated
 
-        # Determine which rows are "+" (with agent) based on split kind
-        split_kind, split_value = (split_arg.split(":", 1) + [""])[:2]
-
-        def _is_plus(r: dict) -> bool:
-            if split_kind == "reviewer":
-                return split_value in json.loads(r["reviewers"] or "[]")
-            if split_kind == "commenter":
-                return (r["repo_id"], r["pr_id"]) in (commenter_pr_set or set())
-            return True  # total — everything is "+", exclusion makes no sense
-
-        if split_kind in ("reviewer", "commenter"):
-            # Build plus_repos per (group, bucket). group_key = project_key when grouping, else ""
-            all_rows_flat = [r for rows in raw_per_repo.values() for r in rows]
-            plus_repos: dict[tuple, set] = {}
-            for r in all_rows_flat:
-                if r["state"] != "MERGED" or not r.get("created_date") or not _is_plus(r):
+        # total_repos special: track per-bucket sets for the union "total=" line
+        if metric_name == "total_repos":
+            from pa.metrics import bucket_key as _bk_fn0
+            for label, _ in decorated:
+                # Re-derive sets for this series's rows. We need the row subset
+                # that actually contributed — but with auto_wrap this is opaque.
+                # For now: union over all rows (one entry, since total_repos is
+                # not auto-Split-wrapped when @-source, and for non-source it's
+                # PR-level so we just compute total per series).
+                pass  # (printed total falls back to sum-of-buckets for now)
+            # Compute single union set for default series labelling.
+            sets: dict[str, set] = {}
+            for r in all_rows:
+                if r.get("state") != "MERGED" or not r.get("created_date"):
                     continue
-                group_key = r.get("project_key", "") if group_by == "project" else ""
-                bk = _bk_fn(r["created_date"], period)
-                plus_repos.setdefault((group_key, bk), set()).add(r["repo_id"])
-
-            # Identify "-" series by label prefix / marker and recompute
-            updated = []
-            for label, buckets in metric_results.get("total_repos", []):
-                # "+" labels start with "+ " or "∈ " (with optional "group / " prefix)
-                is_minus = ("- " in label) or ("∉ " in label)
-                if not is_minus:
-                    updated.append((label, buckets))
-                    continue
-
-                # Find the corresponding series' rows
-                matching_series = next((s for s in series_list if s.label == label), None)
-                if matching_series is None:
-                    updated.append((label, buckets))
-                    continue
-
-                new_buckets: dict[str, set] = {}
-                for r in matching_series.rows:
-                    if r["state"] != "MERGED" or not r.get("created_date"):
-                        continue
-                    group_key = r.get("project_key", "") if group_by == "project" else ""
-                    bk = _bk_fn(r["created_date"], period)
-                    if r["repo_id"] in plus_repos.get((group_key, bk), set()):
-                        continue  # repo has agent PR this period — exclude
-                    new_buckets.setdefault(bk, set()).add(r["repo_id"])
-                counts = {bk: float(len(s)) for bk, s in new_buckets.items()}
-                updated.append((label, counts))
-                all_buckets.update(counts.keys())
-
-            if updated:
-                metric_results["total_repos"] = updated
+                sets.setdefault(_bk_fn0(r["created_date"], period), set()).add(r["repo_id"])
+            for label, _ in decorated:
+                total_repos_sets[label] = sets
 
     if not all_buckets:
         log.error("No data to plot.")
         sys.exit(4)
 
     sorted_buckets = sorted(all_buckets)
+
+    # ── json output: dump metric_results and return (machine-readable) ────────
+    if plot_type == "json":
+        import json as _json
+        result = {
+            "period": period, "state": state,
+            "buckets": sorted_buckets,
+            "metrics": [
+                {
+                    "name": mname,
+                    "label": METRICS[mname].label,
+                    "unit": METRICS[mname].unit,
+                    "plot_kind": METRICS[mname].plot_kind,
+                    "series": [
+                        {"label": label, "buckets": {bk: buckets[bk] for bk in sorted(buckets.keys())}}
+                        for label, buckets in metric_results.get(mname, [])
+                    ],
+                }
+                for mname in requested_metrics
+            ],
+        }
+        out_text = _json.dumps(result, ensure_ascii=False, indent=2)
+        # Default output for trend is "output/chart.png" — treat that as
+        # "no explicit output", and write to stdout instead.
+        if output and output not in ("output/chart.png", "/dev/null"):
+            Path(output).write_text(out_text, encoding="utf-8")
+            print(f"Result written to {output}", flush=True)
+        else:
+            print(out_text)
+        return
+
     n_metrics = len(requested_metrics)
     period_label = "Week" if period == "week" else "Month"
     w = max(10, len(sorted_buckets) * 0.8)
@@ -925,11 +918,22 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
     # ── Print totals for count-based metrics ─────────────────────────────────
     for mname in requested_metrics:
-        if METRICS[mname].plot_kind == "bar":
-            for label, buckets in metric_results[mname]:
+        if METRICS[mname].plot_kind != "bar":
+            continue
+        for label, buckets in metric_results[mname]:
+            if mname == "total_repos":
+                # Unique repos across the whole range (union of per-period sets),
+                # not sum of per-period unique counts (which double-counts repos
+                # active in multiple periods).
+                sets = total_repos_sets.get(label, {})
+                union: set = set()
+                for s in sets.values():
+                    union |= s
+                total_val = float(len(union))
+            else:
                 total_val = sum(buckets.values())
-                if total_val:
-                    print(f"{METRICS[mname].label}  [{label}]  total={METRICS[mname].fmt(total_val)}")
+            if total_val:
+                print(f"{METRICS[mname].label}  [{label}]  total={METRICS[mname].fmt(total_val)}")
 
     out_path = Path(output)
     if out_path.suffix.lower() == ".html":

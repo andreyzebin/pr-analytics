@@ -1,32 +1,40 @@
 """
-Metric registry for trend charts.
+Metric registry.
+
+Each metric is defined declaratively as a `MetricDef` with an `expr` from
+pa.dsl. The render layer in cmd_plot.py is metric-agnostic — it evaluates
+the expression against series rows and renders the resulting buckets.
 
 Adding a new metric:
-  1. Write a compute function: (rows, period, state) -> dict[bucket_str, float]
-     - rows: list of sqlite3.Row with fields created_date, closed_date, state, reviewers
-     - period: "week" | "month"
-     - state: the --state CLI arg (used by metrics that care about it)
-  2. Add a MetricDef entry to METRICS.
+  METRICS["my_metric"] = MetricDef(
+      label="…", unit="…", plot_kind="bar",
+      fmt=lambda v: str(int(v)),
+      expr=Count(where=Eq("state", "MERGED")),
+  )
 
-The render layer in cmd_plot.py is metric-agnostic — it only uses
-MetricDef.label, unit, plot_kind, compute, and fmt.
+For multi-source ratios use `FromSource`, for repo-level adoption metrics
+set `bypass_split=True` and group via --group-by.
 """
 from __future__ import annotations
 
-import statistics
-from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Callable
 
+# Re-exported for backward compatibility — the canonical home is pa.buckets.
+from pa.buckets import bucket_key, fmt_hours  # noqa: F401
 
-def bucket_key(ts_ms: int, period: str) -> str:
-    dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-    return dt.strftime("%G-W%V") if period == "week" else dt.strftime("%Y-%m")
+from pa.dsl import (
+    And, BinOp, Const, Contains, Count, CountDistinct, Eq, FromSource, In,
+    IsNotNull, Median, Or, Ratio, RowBinOp, RowConst, RowField, Sum, Var,
+)
 
 
-def fmt_hours(hours: float) -> str:
-    return f"{hours * 60:.0f}m" if hours < 1 else f"{hours:.1f}h"
+def _hours_between(later_field: str, earlier_field: str):
+    """Row expression: (later - earlier) in hours (ms→hours: /3_600_000)."""
+    return RowBinOp("/",
+                    RowBinOp("-", RowField(later_field), RowField(earlier_field)),
+                    RowConst(3_600_000))
+from pa.sources import analysis_source, comments_source, merge_source
 
 
 @dataclass
@@ -34,101 +42,16 @@ class MetricDef:
     label: str       # Y-axis label
     unit: str        # displayed in parentheses after label
     plot_kind: str   # "line" | "bar"
-    compute: Callable  # (rows, period, state) -> dict[str, float]
     fmt: Callable      # (value) -> annotation string
     log_scale: bool = False  # logarithmic Y-axis
     row_value: Callable | None = None  # (row, state) -> float | None
-                                       # Non-None = per-PR metric; None = aggregated only
-
-
-# ── compute functions ─────────────────────────────────────────────────────────
-
-def _cycle_time(rows, period: str, state: str) -> dict[str, float]:
-    """Median cycle time in hours, bucketed by closed_date."""
-    buckets: dict[str, list[float]] = defaultdict(list)
-    for r in rows:
-        if r["state"] != state or not r["closed_date"] or not r["created_date"]:
-            continue
-        ct = (r["closed_date"] - r["created_date"]) / 3_600_000
-        buckets[bucket_key(r["closed_date"], period)].append(ct)
-    return {bk: statistics.median(v) for bk, v in buckets.items()}
-
-
-def _acceptance_rate(rows, period: str, state: str) -> dict[str, float]:
-    """MERGED / (MERGED + DECLINED) × 100, bucketed by closed_date."""
-    merged: dict[str, int] = defaultdict(int)
-    total: dict[str, int] = defaultdict(int)
-    for r in rows:
-        if r["state"] not in ("MERGED", "DECLINED") or not r["closed_date"]:
-            continue
-        bk = bucket_key(r["closed_date"], period)
-        total[bk] += 1
-        if r["state"] == "MERGED":
-            merged[bk] += 1
-    return {bk: merged[bk] / total[bk] * 100 for bk in total}
-
-
-def _throughput(rows, period: str, state: str) -> dict[str, float]:
-    """Count of MERGED PRs per period, bucketed by closed_date."""
-    buckets: dict[str, int] = defaultdict(int)
-    for r in rows:
-        if r["state"] == "MERGED" and r["closed_date"]:
-            buckets[bucket_key(r["closed_date"], period)] += 1
-    return dict(buckets)
-
-
-def _total_prs(rows, period: str, state: str) -> dict[str, float]:
-    """Total count of PRs (any terminal state) per period, bucketed by closed_date."""
-    buckets: dict[str, int] = defaultdict(int)
-    for r in rows:
-        if r["state"] in ("MERGED", "DECLINED") and r["closed_date"]:
-            buckets[bucket_key(r["closed_date"], period)] += 1
-    return dict(buckets)
-
-
-def _total_repos(rows, period: str, state: str) -> dict[str, float]:
-    """Unique MERGED repos per period, bucketed by created_date.
-    Counts distinct repo_id where at least one MERGED PR was created in the period.
-    Works with --split: receives filtered rows (e.g., only PRs with/without agent),
-    so a repo appears in a period only if it has a matching PR in that period."""
-    buckets: dict[str, set] = defaultdict(set)
-    for r in rows:
-        if r["state"] != "MERGED" or not r.get("created_date"):
-            continue
-        buckets[bucket_key(r["created_date"], period)].add(r["repo_id"])
-    return {bk: float(len(s)) for bk, s in buckets.items()}
-
-
-def _agent_comments(rows, period: str, state: str) -> dict[str, float]:
-    """Total root comments by agent per period, bucketed by closed_date."""
-    buckets: dict[str, float] = defaultdict(float)
-    for r in rows:
-        if r["state"] not in ("MERGED", "DECLINED") or not r["closed_date"]:
-            continue
-        cnt = r.get("agent_comment_count")
-        if cnt:
-            buckets[bucket_key(r["closed_date"], period)] += cnt
-    return dict(buckets)
-
-
-def _time_to_first_comment(rows, period: str, state: str) -> dict[str, float]:
-    """Median hours from PR creation to first non-author comment, bucketed by closed_date.
-
-    PRs with no reviewer comments are excluded from the median.
-    Requires first_comment_date field in rows (populated via LEFT JOIN in cmd_plot).
-    """
-    buckets: dict[str, list[float]] = defaultdict(list)
-    for r in rows:
-        if r["state"] != state or not r["closed_date"]:
-            continue
-        fcd = r.get("first_comment_date") if isinstance(r, dict) else None
-        if not fcd or not r["created_date"]:
-            continue
-        hours = (fcd - r["created_date"]) / 3_600_000
-        if hours < 0:
-            continue  # data anomaly: comment before PR creation
-        buckets[bucket_key(r["closed_date"], period)].append(hours)
-    return {bk: statistics.median(v) for bk, v in buckets.items()}
+                                       # Non-None = per-PR metric for box/points
+    expr: object | None = None  # pa.dsl.Expr — required for trend/json
+    # When True, evaluate over the *unsplit* row-set, grouped only by the CLI
+    # --group-by field (one series per group). For PR-rate metrics where each
+    # row contributes to numerator+denominator within its group, regardless of
+    # cohort. Default: respect series_list (split + group-by).
+    bypass_split: bool = False
 
 
 # ── registry ──────────────────────────────────────────────────────────────────
@@ -136,7 +59,11 @@ def _time_to_first_comment(rows, period: str, state: str) -> dict[str, float]:
 METRICS: dict[str, MetricDef] = {
     "cycle_time": MetricDef(
         label="Median Cycle Time", unit="hours", plot_kind="line",
-        compute=_cycle_time, fmt=fmt_hours, log_scale=True,
+        fmt=fmt_hours, log_scale=True,
+        expr=Median(
+            field=_hours_between("closed_date", "created_date"),
+            where=And((Eq("state", Var("state")), IsNotNull("created_date"))),
+        ),
         row_value=lambda r, state: (
             (r["closed_date"] - r["created_date"]) / 3_600_000
             if r.get("state") == state and r.get("closed_date") and r.get("created_date")
@@ -145,23 +72,35 @@ METRICS: dict[str, MetricDef] = {
     ),
     "acceptance_rate": MetricDef(
         label="Acceptance Rate", unit="%", plot_kind="line",
-        compute=_acceptance_rate, fmt=lambda v: f"{v:.0f}%",
+        fmt=lambda v: f"{v:.0f}%",
+        expr=Ratio(
+            Count(where=Eq("state", "MERGED")),
+            Count(where=In("state", ["MERGED", "DECLINED"])),
+        ),
     ),
     "throughput": MetricDef(
         label="Throughput", unit="PRs merged", plot_kind="bar",
-        compute=_throughput, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=Count(where=Eq("state", "MERGED")),
     ),
     "total_prs": MetricDef(
         label="Total PRs", unit="count", plot_kind="bar",
-        compute=_total_prs, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=Count(where=Eq("state", Var("state"))),
     ),
     "total_repos": MetricDef(
         label="Active Repos", unit="count", plot_kind="bar",
-        compute=_total_repos, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=CountDistinct("repo_id", where=Eq("state", "MERGED"),
+                           bucket_field="created_date"),
     ),
     "time_to_first_comment": MetricDef(
         label="Time to First Review Comment", unit="hours", plot_kind="line",
-        compute=_time_to_first_comment, fmt=fmt_hours, log_scale=True,
+        fmt=fmt_hours, log_scale=True,
+        expr=Median(
+            field=_hours_between("first_comment_date", "created_date"),
+            where=And((Eq("state", Var("state")), IsNotNull("first_comment_date"))),
+        ),
         row_value=lambda r, state: (
             (r["first_comment_date"] - r["created_date"]) / 3_600_000
             if r.get("state") == state and r.get("first_comment_date")
@@ -171,76 +110,142 @@ METRICS: dict[str, MetricDef] = {
     ),
     "agent_comments": MetricDef(
         label="Agent Comments", unit="count", plot_kind="bar",
-        compute=_agent_comments, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=Sum("agent_comment_count",
+                 where=In("state", ["MERGED", "DECLINED"])),
         row_value=lambda r, state: (
             r.get("agent_comment_count")
             if r.get("state") in ("MERGED", "DECLINED") and r.get("closed_date")
             else None
         ),
     ),
+    "adoption_rate": MetricDef(
+        label="Adoption Rate", unit="%", plot_kind="line",
+        fmt=lambda v: f"{v:.0f}%",
+        # adoption_rate = PRs_with_agent / PRs_total × 100% per (group, period).
+        # bypass_split: cohort split is irrelevant — every PR (in --state) goes
+        # into both numerator and denominator of its group.
+        bypass_split=True,
+        expr=Ratio(
+            Count(where=And((
+                Eq("state", Var("state")),
+                Or((Contains(Var("reviewer_slug"), "reviewers"),
+                    Contains(Var("commenter_slug"), "commenters"))),
+            )), bucket_field="created_date"),
+            Count(where=Eq("state", Var("state")), bucket_field="created_date"),
+        ),
+    ),
     "agent_inline_comments": MetricDef(
         label="Agent Inline Comments", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(comments_source, Count(where=And((
+            Eq("author", Var("author")),
+            Eq("parent_id", None),
+            IsNotNull("file_path"),
+        )))),
     ),
     "feedback_rate": MetricDef(
         label="Feedback Rate", unit="%", plot_kind="line",
-        # compute=None — fetched separately in cmd_plot (requires --author)
-        # feedback_rate = comments_with_feedback / total_comments × 100%
-        compute=None,
         fmt=lambda v: f"{v:.0f}%",
+        # comments_with_feedback / total_root_comments × 100%
+        expr=FromSource(comments_source, Ratio(
+            Count(where=And((
+                Eq("author", Var("author")),
+                Eq("parent_id", None),
+                Or((Eq("has_reaction", 1), Eq("has_reply", 1))),
+            ))),
+            Count(where=And((
+                Eq("author", Var("author")),
+                Eq("parent_id", None),
+            ))),
+        )),
+    ),
+    "feedback_all": MetricDef(
+        label="Comments with Feedback", unit="count", plot_kind="bar",
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(comments_source, Count(where=And((
+            Eq("author", Var("author")),
+            Eq("parent_id", None),
+            Or((Eq("has_reaction", 1), Eq("has_reply", 1))),
+        )))),
     ),
     "feedback_acceptance_rate": MetricDef(
         label="Feedback Acceptance Rate", unit="%", plot_kind="line",
-        # compute=None — fetched separately in cmd_plot (requires --author + --judge-model)
-        # yes / (yes + no) × 100% — only among comments with feedback
-        compute=None,
         fmt=lambda v: f"{v:.0f}%",
+        # yes / (yes + no) × 100% — only comments with verdict
+        expr=FromSource(analysis_source, Ratio(
+            Count(where=And((Eq("verdict", "yes"), Eq("author", Var("author"))))),
+            Count(where=And((In("verdict", ["yes", "no"]),
+                             Eq("author", Var("author"))))),
+        )),
     ),
     "feedback_acceptance_rate_all": MetricDef(
         label="Feedback Acceptance Rate (all)", unit="%", plot_kind="line",
-        # compute=None — fetched separately in cmd_plot (requires --author + --judge-model)
-        # yes / total_comments × 100% — denominator includes comments without any feedback
-        compute=None,
         fmt=lambda v: f"{v:.0f}%",
+        # yes (from @analysis) / all_root_agent_comments (from @comments)
+        expr=Ratio(
+            FromSource(analysis_source, Count(where=And((
+                Eq("verdict", "yes"), Eq("author", Var("author")))))),
+            FromSource(comments_source, Count(where=And((
+                Eq("author", Var("author")), Eq("parent_id", None))))),
+        ),
     ),
     "merge_acceptance_rate": MetricDef(
         label="Merge Acceptance Rate", unit="%", plot_kind="line",
-        # compute=None — fetched from merge_analysis (requires --author + --judge-model)
-        # (YES + 0.5*PARTIAL) / (YES + PARTIAL + NO) × 100%
-        compute=None,
         fmt=lambda v: f"{v:.0f}%",
+        # (YES + 0.5*PARTIAL) / (YES + PARTIAL + NO) × 100%
+        expr=FromSource(merge_source, Ratio(
+            BinOp("+",
+                  Count(where=And((Eq("verdict", "YES"),
+                                   Eq("author", Var("author"))))),
+                  BinOp("*", Const(0.5),
+                        Count(where=And((Eq("verdict", "PARTIAL"),
+                                         Eq("author", Var("author"))))))),
+            Count(where=And((In("verdict", ["YES", "PARTIAL", "NO"]),
+                             Eq("author", Var("author"))))),
+        )),
     ),
     # ── Absolute count metrics (bar charts) ──────────────────────────────
-    "feedback_all": MetricDef(
-        label="Comments with Feedback", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
-    ),
     "feedback_yes": MetricDef(
         label="Feedback: Accepted", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(analysis_source, Count(where=And((
+            Eq("verdict", "yes"), Eq("author", Var("author")))))),
     ),
     "feedback_no": MetricDef(
         label="Feedback: Rejected", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(analysis_source, Count(where=And((
+            Eq("verdict", "no"), Eq("author", Var("author")))))),
     ),
     "feedback_unclear": MetricDef(
         label="Feedback: Unclear", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(analysis_source, Count(where=And((
+            Eq("verdict", "unclear"), Eq("author", Var("author")))))),
     ),
     "merge_yes": MetricDef(
         label="Merge: Accepted", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(merge_source, Count(where=And((
+            Eq("verdict", "YES"), Eq("author", Var("author")))))),
     ),
     "merge_partial": MetricDef(
         label="Merge: Partial", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(merge_source, Count(where=And((
+            Eq("verdict", "PARTIAL"), Eq("author", Var("author")))))),
     ),
     "merge_yes_partial": MetricDef(
         label="Merge: Accepted+Partial", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(merge_source, Count(where=And((
+            In("verdict", ["YES", "PARTIAL"]), Eq("author", Var("author")))))),
     ),
     "merge_no": MetricDef(
         label="Merge: Not Accepted", unit="count", plot_kind="bar",
-        compute=None, fmt=lambda v: str(int(v)),
+        fmt=lambda v: str(int(v)),
+        expr=FromSource(merge_source, Count(where=And((
+            Eq("verdict", "NO"), Eq("author", Var("author")))))),
     ),
 }
