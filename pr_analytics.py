@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repos-file", dest="repos_file", help="File with one PROJ/repo per line")
     p.add_argument("--since", help="Start date (YYYY-MM-DD)")
     p.add_argument("--until", help="End date (YYYY-MM-DD)")
-    p.add_argument("--state", default="MERGED", choices=["MERGED", "DECLINED", "OPEN"])
+    p.add_argument("--state", default=None, choices=["MERGED", "DECLINED", "OPEN"])
     p.add_argument("--reviewer", help="include:<slug> or exclude:<slug>  (filters dataset)")
     p.add_argument("--explain", action="store_true",
                    help="Print DSL expression for each requested metric and exit (no DB access)")
@@ -94,10 +94,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Translate this CLI command to the equivalent --dsl form and print "
                         "a runnable command. Pipes everything else (--type, --output, --projects) "
                         "through unchanged.")
+    p.add_argument("--var", action="append", default=[], dest="dsl_vars",
+                   metavar="NAME=VALUE",
+                   help="Set a DSL variable: 'name=value' (repeatable). Resolves $name "
+                        "inside --dsl expressions. The only way to pass values to --dsl: "
+                        "semantic flags (--period/--since/--split/--author/--state/etc) are "
+                        "forbidden when --dsl is used.")
     p.add_argument("--type", default="box", choices=["box", "points", "trend", "json"],
                    dest="plot_type",
                    help="Chart type: box (default), points (raw values to stdout), trend (over time)")
-    p.add_argument("--period", default="month", choices=["week", "month"],
+    p.add_argument("--period", default=None, choices=["week", "month"],
                    help="Bucketing period for trend (default: month)")
     p.add_argument("--metrics", default="cycle_time",
                    help="Comma-separated metrics for trend: cycle_time, acceptance_rate, throughput"

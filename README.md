@@ -385,30 +385,40 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
   --output output/dual.html
 
 # Эквивалентная команда в DSL-форме (вывод --new-dsl):
+# Семантика (period/range/split/group) внутри DSL; значения пробрасываются через --var.
 .venv/bin/python pr_analytics.py plot \
   --type 'trend' --output 'output/dual.html' \
   --projects 'PROJ1,PROJ2,PROJ3,PROJ4' \
-  --author 'ai-review-bot' --judge-model 'deepseek-chat' \
   --axes 'adoption_rate' --axes 'merge_acceptance_rate' \
+  --var 'state=MERGED' \
+  --var 'author=ai-review-bot' \
+  --var 'judge_model=deepseek-chat' \
+  --var 'reviewer_slug=ai-review-bot' \
   --metrics '' \
-  --dsl "adoption_rate=
+  --dsl 'adoption_rate=
     period(month, range(since=2026-01-01,
       @pr(group(project_key,
         ratio(
-          count((state='MERGED' and ('ai-review-bot' in reviewers or null in commenters)), @created_date),
-          count(state='MERGED', @created_date),
+          count((state=$state and ($reviewer_slug in reviewers or $commenter_slug in commenters)), @created_date),
+          count(state=$state, @created_date),
         ),
-      ))))" \
-  --dsl "merge_acceptance_rate=
+      ))))' \
+  --dsl 'merge_acceptance_rate=
     period(month, range(since=2026-01-01,
-      @merge(group(project_key, split(reviewer:'ai-review-bot',
+      @merge(group(project_key, split(reviewer:$reviewer_slug,
         ratio(
-          (count((verdict='YES' and author='ai-review-bot'))
-           + (0.5 * count((verdict='PARTIAL' and author='ai-review-bot')))),
-          count((verdict in ['YES', 'PARTIAL', 'NO'] and author='ai-review-bot')),
+          (count((verdict="YES" and author=$author))
+           + (0.5 * count((verdict="PARTIAL" and author=$author)))),
+          count((verdict in ["YES","PARTIAL","NO"] and author=$author)),
         ),
-      )))))"
+      )))))'
 ```
+
+**Контракт `--dsl`:**
+
+При использовании `--dsl` запрещены семантические CLI-флаги (`--period`, `--since`, `--until`, `--split`, `--group-by`, `--reviewer`, `--state`, `--author`, `--judge-model`) — DSL уже содержит соответствующие узлы (`period(...)`, `range(...)`, `split(...)`, `group(...)`, фильтры). Значения переменных передаются ТОЛЬКО через `--var name=value` (repeatable). Это устраняет двусмысленность «у меня в DSL `range(since=2026-01-01)`, а CLI `--since 2025-01-01` — что победит?». Контракт жёсткий: ничего не побеждает, такая команда — ошибка.
+
+`--metric` (auto-wrap) работает как раньше — все CLI-флаги применимы.
 
 **Параметры:**
 

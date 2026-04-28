@@ -26,9 +26,11 @@ def _build_dsl_vars(args, cfg, *, conn=None, pr_rows=None,
     Resolves CLI args (state/author/judge-model/split slug) and bundles the
     `_`-prefixed runtime context (db conn, time window, repo scope, pre-fetched
     PR rows) that source fetchers in pa/sources.py read.
+
+    Plus: --var name=value entries are merged in last (override built-ins).
     """
     split_arg = getattr(args, "split", None)
-    return {
+    out = {
         "state":          getattr(args, "state", "MERGED"),
         "author":         getattr(args, "author", None),
         "judge_model":    resolve_judge_model(
@@ -43,6 +45,13 @@ def _build_dsl_vars(args, cfg, *, conn=None, pr_rows=None,
         "_until_ts":      until_ts,
         "_repo_ids":      repo_ids,
     }
+    for spec in (getattr(args, "dsl_vars", None) or []):
+        if "=" not in spec:
+            log.error("--var must be 'name=value', got: %r", spec)
+            sys.exit(1)
+        k, _, v = spec.partition("=")
+        out[k.strip()] = v.strip()
+    return out
 
 
 def _sh_quote(s: str) -> str:
@@ -375,7 +384,7 @@ def _save_trend_html(
 def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     # ── --new-dsl: print equivalent CLI command using --dsl flags, exit ──
     if getattr(args, "new_dsl", False):
-        from pa.dsl import format_expr, substitute_vars
+        from pa.dsl import format_expr
         from pa.config import resolve_judge_model as _resolve_judge_model
         raw_metrics = getattr(args, "metrics", "cycle_time")
         names = [m.strip() for m in raw_metrics.split(",") if m.strip()]
@@ -384,67 +393,54 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         period_arg = getattr(args, "period", None)
         since_arg = getattr(args, "since", None)
         until_arg = getattr(args, "until", None)
+        # Pass through I/O / presentation flags only — semantic flags
+        # (period/since/until/split/group-by/state/author/judge-model) get
+        # absorbed into the DSL or the --var list below.
         passthrough_pairs = []
-        # Pass through args that are NOT absorbed into the DSL.
-        # Skip values that match argparse defaults so the emitted command
-        # stays minimal (and cleaner to copy/paste).
-        defaults = {
-            "plot_type": "box",            # but we want json/etc passed through
-            "output":    "output/chart.png",
-            "layout":    "stack",
-            "state":     "MERGED",
-        }
+        defaults = {"plot_type": "box", "output": "output/chart.png",
+                    "layout": "stack"}
         for cli_flag, attr, value in [
             ("--type",        "plot_type",   getattr(args, "plot_type", None)),
-            ("--state",       "state",       getattr(args, "state", None)),
             ("--output",      "output",      getattr(args, "output", None)),
             ("--projects",    "projects",    getattr(args, "projects", None)),
             ("--repos",       "repos",       getattr(args, "repos", None)),
             ("--repos-file",  "repos_file",  getattr(args, "repos_file", None)),
-            ("--author",      "author",      getattr(args, "author", None)),
-            ("--judge-model", "judge_model", getattr(args, "judge_model", None)),
             ("--db",          "db",          getattr(args, "db", None)),
             ("--layout",      "layout",      getattr(args, "layout", None)),
         ]:
-            if not value:
+            if not value or defaults.get(attr) == value:
                 continue
-            if defaults.get(attr) == value:
-                continue  # default — skip
             passthrough_pairs.append(f"{cli_flag} {_sh_quote(str(value))}")
-        # --axes is repeatable — emit one passthrough flag per group
         for axes_spec in (getattr(args, "axes", None) or []):
             passthrough_pairs.append(f"--axes {_sh_quote(axes_spec)}")
 
-        # Bake CLI-provided values into the DSL so the emitted command is
-        # self-contained (no $reviewer_slug / $state placeholders).
-        # Bake all known vars (including None) so the emitted DSL has no
-        # $-references — keeping bash $… expansion out of the output makes
-        # double-quote shell wrapping safe.
-        bake = {
-            "state": getattr(args, "state", "MERGED"),
-            "author": getattr(args, "author", None),
-            "judge_model": _resolve_judge_model(
-                getattr(args, "judge_model", None), cfg),
-            "reviewer_slug": (split.split(":", 1)[1]
-                              if split and split.startswith("reviewer:") else None),
-            "commenter_slug": (split.split(":", 1)[1]
+        # Emit values for built-in $vars referenced in metric exprs as
+        # --var name=value. Uses CLI flags as the source.
+        var_pairs: list[tuple[str, str]] = []
+        for var_name, val in [
+            ("state",          getattr(args, "state", None) or "MERGED"),
+            ("author",         getattr(args, "author", None)),
+            ("judge_model",    _resolve_judge_model(
+                                   getattr(args, "judge_model", None), cfg)),
+            ("reviewer_slug",  split.split(":", 1)[1]
+                               if split and split.startswith("reviewer:") else None),
+            ("commenter_slug", split.split(":", 1)[1]
                                if split and split.startswith("commenter:") else None),
-        }
+        ]:
+            if val is not None:
+                var_pairs.append((var_name, val))
+        for spec in (getattr(args, "dsl_vars", None) or []):
+            if "=" in spec:
+                k, _, v = spec.partition("=")
+                var_pairs.append((k.strip(), v.strip()))
 
-        # Pretty multi-line shell output:
-        #   python pr_analytics.py plot \
-        #     --type json \
-        #     ...
-        #     --metrics '' \           # suppress the cycle_time default
-        #     --dsl 'metric_name=
-        #       <pretty-printed DSL>
-        #     ' \
-        #     ...
+        # Pretty multi-line shell output
         lines = ["python pr_analytics.py plot"]
         for kv in passthrough_pairs:
             lines.append(f"  {kv}")
-        # Suppress the implicit `cycle_time` default; --dsl entries replace it.
-        lines.append("  --metrics ''")
+        for k, v in var_pairs:
+            lines.append(f"  --var {_sh_quote(f'{k}={v}')}")
+        lines.append("  --metrics ''")  # suppress cycle_time default
         for mname in names:
             if mname not in METRICS or METRICS[mname].expr is None:
                 continue
@@ -452,10 +448,11 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             wrapped = auto_wrap(mdef.expr, split=split, group_by=group_by,
                                 period=period_arg, since=since_arg, until=until_arg,
                                 skip_split=mdef.bypass_split)
-            wrapped = substitute_vars(wrapped, bake)
-            pretty = format_expr(wrapped)             # multi-line, indented
+            # Note: NO substitute_vars — emit Var($name) references as-is.
+            # The --var entries above provide the values at runtime.
+            pretty = format_expr(wrapped)
             indented = "\n".join("    " + ln for ln in pretty.splitlines())
-            payload = f"{mname}=\n{indented}\n  "      # body for the --dsl arg
+            payload = f"{mname}=\n{indented}\n  "
             lines.append(f"  --dsl {_sh_quote(payload)}")
 
         print(" \\\n".join(lines))
@@ -521,12 +518,41 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         log.error("No repositories specified.")
         sys.exit(1)
 
+    # ── --dsl is var-only mode: forbid all semantic CLI flags ─────────────
+    # When the user supplies fully-wrapped DSL via --dsl, every semantic CLI
+    # flag (--period/--since/--until/--split/--group-by/--reviewer/--state/
+    # --author/--judge-model) becomes ambiguous: the DSL already encodes the
+    # semantics, and the flag would silently be a no-op or worse, drift.
+    # Only --var name=value is accepted to inject values into Var($name).
+    if getattr(args, "full_dsl", []):
+        forbidden = []
+        for flag, attr in [("--period",     "period"),
+                           ("--since",      "since"),
+                           ("--until",      "until"),
+                           ("--split",      "split"),
+                           ("--group-by",   "group_by"),
+                           ("--reviewer",   "reviewer"),
+                           ("--state",      "state"),
+                           ("--author",     "author"),
+                           ("--judge-model","judge_model")]:
+            if getattr(args, attr, None):
+                forbidden.append(flag)
+        if forbidden:
+            log.error(
+                "--dsl mode forbids semantic flags: %s. They have no effect "
+                "on --dsl metrics (the DSL itself contains period/range/group/"
+                "split/@source). Pass values via --var name=value instead "
+                "(e.g. --var state=MERGED --var author=ai-bot).",
+                ", ".join(forbidden),
+            )
+            sys.exit(1)
+
     since_ts  = date_to_ms(args.since) if args.since else None
     until_ts  = date_to_ms(args.until, end_of_day=True) if args.until else None
-    state     = getattr(args, "state", "MERGED")
+    state     = getattr(args, "state", None) or "MERGED"
     output    = getattr(args, "output", "output/chart.png")
     plot_type = getattr(args, "plot_type", "box")
-    period    = getattr(args, "period", "month")
+    period    = getattr(args, "period", None) or "month"
     split_arg = getattr(args, "split", None)
     group_by  = getattr(args, "group_by", None)
     layout    = getattr(args, "layout", "stack")
