@@ -81,4 +81,10 @@ def collect_repos_from_args(
                 repos.append((proj_key, row["slug"]))
         return repos
 
+    # No repo filter given → default to every repo in the cache.
+    rows = conn.execute(
+        "SELECT project_key, slug FROM repos ORDER BY project_key, slug"
+    ).fetchall()
+    for row in rows:
+        repos.append((row["project_key"], row["slug"]))
     return repos

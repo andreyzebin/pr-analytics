@@ -956,10 +956,18 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     # `--axes "a,b"` (repeatable) defines per-subplot metric groups.
     # Each group becomes one subplot; metrics within a group share the y-axis
     # (overlay rendering, no twinx). Falls back to legacy --layout when not set.
+    # Build a name→slug map so --axes can reference --metric/--dsl entries
+    # by their user-supplied label, not the internal `_ad_hoc_*` slug.
+    metric_lookup: dict[str, str] = {m: m for m in requested_metrics}
+    for slug in requested_metrics:
+        if slug.startswith(("_ad_hoc_", "_full_dsl_")):
+            metric_lookup[METRICS[slug].label] = slug
+
     axes_groups: list[list[str]] = []
     for spec in (getattr(args, "axes", None) or []):
-        names = [m.strip() for m in spec.split(",") if m.strip()]
-        unknown = [m for m in names if m not in requested_metrics]
+        names_raw = [m.strip() for m in spec.split(",") if m.strip()]
+        names = [metric_lookup.get(n, n) for n in names_raw]
+        unknown = [n for n, slug in zip(names_raw, names) if slug not in requested_metrics]
         if unknown:
             log.error("--axes references unknown metric(s) %s. Pass them via "
                       "--metrics, --metric, or --dsl first.", unknown)
