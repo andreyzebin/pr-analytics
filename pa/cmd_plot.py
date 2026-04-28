@@ -298,6 +298,10 @@ def _save_trend_html(
             height=max(400, 250 * n_rows + 100),
             hovermode="x unified",
         )
+        # Pin X-axis category order to chronological sorted_buckets (otherwise
+        # plotly uses first-seen order across traces, which produces zigzags
+        # when later series have earlier dates than earlier series).
+        fig.update_xaxes(categoryorder="array", categoryarray=sorted_buckets)
         fig.write_html(str(out_path))
         return True
 
