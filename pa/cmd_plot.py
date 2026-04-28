@@ -633,71 +633,86 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
     # ── points ────────────────────────────────────────────────────────────────
+    # Unified path: every metric goes through auto_wrap → eval_series like
+    # --type trend / --type json. The result is one set of series per metric
+    # (with split/group already applied by the DSL). For per-PR metrics
+    # (those whose `expr` ends in `Median(field=RowExpr)`), additionally
+    # render each underlying row's value below the bucket table.
     if plot_type == "points":
+        from pa.dsl import Median, Sum, RowExpr, FromSource, Group, Split, Period, DateRange
+
         # repo_id -> "PROJ/repo" label
         repo_id_to_label: dict[int, str] = {}
         for lbl, rows_list in raw_per_repo.items():
             for r in rows_list:
                 repo_id_to_label[r["repo_id"]] = lbl
 
-        per_pr_metrics  = [m for m in requested_metrics if METRICS[m].row_value is not None]
-        aggregated_metrics = [m for m in requested_metrics
-                              if METRICS[m].row_value is None and METRICS[m].expr is not None]
-        skipped = [m for m in requested_metrics
-                   if METRICS[m].row_value is None and METRICS[m].expr is None]
-        if skipped:
-            log.warning("--type points doesn't support metrics: %s", ", ".join(skipped))
+        all_rows = [r for rl in raw_per_repo.values() for r in rl]
+        dsl_vars = _build_dsl_vars(
+            args, cfg, conn=conn, pr_rows=all_rows,
+            since_ts=since_ts, until_ts=until_ts, repo_ids=all_repo_ids,
+        )
 
-        for series in series_list:
-            print(f"\n{'─' * 60}")
-            print(f"{series.label}")
-
-            # ── per-PR metrics: one block per metric ──────────────────────
-            for mname in per_pr_metrics:
-                mdef = METRICS[mname]
-                pts = sorted(
-                    (r["closed_date"], r["repo_id"], r["pr_id"], mdef.row_value(r, state))
-                    for r in series.rows
-                    if mdef.row_value(r, state) is not None
-                )
-                if not pts:
-                    print(f"\n  [{mname}]  no data")
+        def _row_aggregator(expr):
+            """Drill through wrapper nodes and return the innermost
+            Median/Sum aggregator if its `field` is a RowExpr — that means
+            the metric has a per-PR value extractable for points display."""
+            seen = expr
+            while True:
+                if isinstance(seen, (Period, DateRange, FromSource, Group, Split)):
+                    seen = seen.inner
                     continue
-                values = [v for _, _, _, v in pts]
-                med = statistics.median(values)
-                print(f"\n  [{mname}]  n={len(pts)}, median={mdef.fmt(med)}")
-                col_w = max(len(f"{repo_id_to_label.get(rid, rid)}#{pid}") for _, rid, pid, _ in pts)
-                for closed_ms, repo_id, pr_id, v in pts:
-                    ref = f"{repo_id_to_label.get(repo_id, str(repo_id))}#{pr_id}"
-                    tag = "  ← median" if v == med else ""
-                    print(f"  {ms_to_date(closed_ms)}  {ref:<{col_w}}  {mdef.fmt(v):>8}{tag}")
+                break
+            if isinstance(seen, (Median, Sum)) and isinstance(seen.field, RowExpr):
+                return seen
+            return None
 
-            # ── aggregated metrics: one combined period table ─────────────
-            if aggregated_metrics:
-                all_buckets: set[str] = set()
-                agg_data: dict[str, dict[str, float]] = {}
-                vars_for_eval = _build_dsl_vars(
-                    args, cfg, conn=conn, pr_rows=series.rows,
-                    since_ts=since_ts, until_ts=until_ts,
-                )
-                for mname in aggregated_metrics:
-                    buckets = METRICS[mname].expr.eval(series.rows, period, vars_for_eval)
-                    agg_data[mname] = buckets
-                    all_buckets.update(buckets.keys())
+        for mname in requested_metrics:
+            mdef = METRICS[mname]
+            if mdef.expr is None:
+                log.warning("--type points: %r has no expr; skipped", mname)
+                continue
+            wrapped = auto_wrap(
+                mdef.expr, split=split_arg, group_by=group_by, period=period,
+                since=getattr(args, "since", None),
+                until=getattr(args, "until", None),
+                skip_split=mdef.bypass_split,
+            )
+            results = wrapped.eval_series(all_rows, period, dsl_vars)
 
-                period_label = "week" if period == "week" else "month"
-                print(f"\n  [{', '.join(aggregated_metrics)}]  by {period_label}")
-                col_w2 = max((len(METRICS[m].label) for m in aggregated_metrics), default=8)
-                header = f"  {'period':<12}" + "".join(f"  {METRICS[m].label:>{col_w2}}" for m in aggregated_metrics)
-                print(header)
-                for bk in sorted(all_buckets):
-                    row_str = f"  {bk:<12}"
-                    for mname in aggregated_metrics:
-                        v = agg_data[mname].get(bk)
-                        val_str = METRICS[mname].fmt(v) if v is not None else "-"
-                        row_str += f"  {val_str:>{col_w2}}"
-                    print(row_str)
+            print(f"\n{'─' * 60}")
+            print(f"  [{mname}]  ({mdef.label})")
 
+            period_label = "week" if period == "week" else "month"
+            for label, buckets in results:
+                if not buckets:
+                    continue
+                print(f"\n  {label or mname}  by {period_label}")
+                col_w = max(len(mdef.label), 14)
+                print(f"  {'period':<12}  {mdef.label:>{col_w}}")
+                for bk in sorted(buckets):
+                    print(f"  {bk:<12}  {mdef.fmt(buckets[bk]):>{col_w}}")
+
+            # Per-PR drill-down for Median/Sum-of-RowExpr metrics
+            row_agg = _row_aggregator(mdef.expr)
+            if row_agg is None:
+                continue
+            pts = sorted(
+                (r["closed_date"], r["repo_id"], r.get("pr_id"), row_agg.field(r))
+                for r in all_rows
+                if (row_agg.where is None or row_agg.where(r, dsl_vars))
+                and row_agg.field(r) is not None
+            )
+            if not pts:
+                continue
+            values = [v for _, _, _, v in pts]
+            med = statistics.median(values)
+            print(f"\n  per-PR  n={len(pts)}, median={mdef.fmt(med)}")
+            col_w = max(len(f"{repo_id_to_label.get(rid, rid)}#{pid}") for _, rid, pid, _ in pts)
+            for closed_ms, repo_id, pr_id, v in pts:
+                ref = f"{repo_id_to_label.get(repo_id, str(repo_id))}#{pr_id}"
+                tag = "  ← median" if v == med else ""
+                print(f"  {ms_to_date(closed_ms)}  {ref:<{col_w}}  {mdef.fmt(v):>8}{tag}")
         return
 
     # ── box ───────────────────────────────────────────────────────────────────

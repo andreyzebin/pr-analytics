@@ -43,14 +43,16 @@ class MetricDef:
     unit: str        # displayed in parentheses after label
     plot_kind: str   # "line" | "bar"
     fmt: Callable      # (value) -> annotation string
+    expr: object      # pa.dsl.Expr — declarative aggregation, required.
+                     # cmd_plot wraps it with auto_wrap (period/range/group/split)
+                     # before evaluation. For per-PR drill-down (--type points
+                     # / --type box), the inner Median/Sum field is used as the
+                     # row-level value when it is a RowExpr.
     log_scale: bool = False  # logarithmic Y-axis
-    row_value: Callable | None = None  # (row, state) -> float | None
-                                       # Non-None = per-PR metric for box/points
-    expr: object | None = None  # pa.dsl.Expr — required for trend/json
-    # When True, evaluate over the *unsplit* row-set, grouped only by the CLI
-    # --group-by field (one series per group). For PR-rate metrics where each
-    # row contributes to numerator+denominator within its group, regardless of
-    # cohort. Default: respect series_list (split + group-by).
+    # When True, the CLI --split is treated as variable injection only,
+    # not as a cohort wrap (auto_wrap skips Split). Used for adoption-style
+    # metrics where every PR contributes to both numerator and denominator
+    # of its group regardless of cohort membership.
     bypass_split: bool = False
 
 
@@ -63,11 +65,6 @@ METRICS: dict[str, MetricDef] = {
         expr=Median(
             field=_hours_between("closed_date", "created_date"),
             where=And((Eq("state", Var("state")), IsNotNull("created_date"))),
-        ),
-        row_value=lambda r, state: (
-            (r["closed_date"] - r["created_date"]) / 3_600_000
-            if r.get("state") == state and r.get("closed_date") and r.get("created_date")
-            else None
         ),
     ),
     "acceptance_rate": MetricDef(
@@ -101,23 +98,12 @@ METRICS: dict[str, MetricDef] = {
             field=_hours_between("first_comment_date", "created_date"),
             where=And((Eq("state", Var("state")), IsNotNull("first_comment_date"))),
         ),
-        row_value=lambda r, state: (
-            (r["first_comment_date"] - r["created_date"]) / 3_600_000
-            if r.get("state") == state and r.get("first_comment_date")
-               and r.get("created_date") and r["first_comment_date"] >= r["created_date"]
-            else None
-        ),
     ),
     "agent_comments": MetricDef(
         label="Agent Comments", unit="count", plot_kind="bar",
         fmt=lambda v: str(int(v)),
         expr=Sum("agent_comment_count",
                  where=In("state", ["MERGED", "DECLINED"])),
-        row_value=lambda r, state: (
-            r.get("agent_comment_count")
-            if r.get("state") in ("MERGED", "DECLINED") and r.get("closed_date")
-            else None
-        ),
     ),
     "adoption_rate": MetricDef(
         label="Adoption Rate", unit="%", plot_kind="line",
