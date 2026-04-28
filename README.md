@@ -370,6 +370,44 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 .venv/bin/python pr_analytics.py plot \
   --repos "PROJ1/backend" --since 2026-01-01 \
   --type points
+
+# Несколько метрик на разных subplot'ах через --axes (одна группа = одна subplot)
+# Adoption по проектам сверху, merge-acceptance по тем же проектам снизу:
+.venv/bin/python pr_analytics.py plot \
+  --since 2026-01-01 --state MERGED \
+  --type trend --period month \
+  --author ai-review-bot --judge-model deepseek-chat \
+  --split reviewer:ai-review-bot \
+  --metrics adoption_rate,merge_acceptance_rate \
+  --group-by project \
+  --projects PROJ1,PROJ2,PROJ3,PROJ4 \
+  --axes "adoption_rate" --axes "merge_acceptance_rate" \
+  --output output/dual.html
+
+# Эквивалентная команда в DSL-форме (вывод --new-dsl):
+.venv/bin/python pr_analytics.py plot \
+  --type 'trend' --output 'output/dual.html' \
+  --projects 'PROJ1,PROJ2,PROJ3,PROJ4' \
+  --author 'ai-review-bot' --judge-model 'deepseek-chat' \
+  --axes 'adoption_rate' --axes 'merge_acceptance_rate' \
+  --metrics '' \
+  --dsl "adoption_rate=
+    period(month, range(since=2026-01-01,
+      @pr(group(project_key,
+        ratio(
+          count((state='MERGED' and ('ai-review-bot' in reviewers or null in commenters)), @created_date),
+          count(state='MERGED', @created_date),
+        ),
+      ))))" \
+  --dsl "merge_acceptance_rate=
+    period(month, range(since=2026-01-01,
+      @merge(group(project_key, split(reviewer:'ai-review-bot',
+        ratio(
+          (count((verdict='YES' and author='ai-review-bot'))
+           + (0.5 * count((verdict='PARTIAL' and author='ai-review-bot')))),
+          count((verdict in ['YES', 'PARTIAL', 'NO'] and author='ai-review-bot')),
+        ),
+      )))))"
 ```
 
 **Параметры:**
@@ -378,15 +416,20 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 |---|---|
 | `--repos` / `--projects` / `--repos-file` | Источник репозиториев |
 | `--state` | `MERGED` (по умолчанию), `DECLINED`, `OPEN` |
-| `--type` | `box` / `trend` / `points` |
+| `--type` | `box` / `trend` / `points` / `json` |
 | `--metrics` | Comma-separated метрики для trend (default: `cycle_time`) |
+| `--metric` | Ad-hoc метрика `'label=<dsl-expr>'`, repeatable; auto-wrapped CLI-флагами |
+| `--dsl` | Полный DSL `'label=<dsl-expr>'` без auto-wrap, repeatable |
 | `--period` | `month` (по умолчанию) или `week` — для trend |
-| `--layout` | `stack` (subplot'ы, по умолчанию) или `overlay` (dual y-axis, только 2 метрики) |
+| `--axes` | `'m1,m2'` — явная группировка метрик в subplot'ы; repeatable. Метрики внутри одной группы рисуются overlay'ом |
+| `--layout` | `stack` (subplot'ы, по умолчанию) или `overlay` (dual y-axis, только 2 метрики). Игнорируется при `--axes` |
 | `--split` | Режим серий (см. ниже) |
 | `--reviewer` | `include:<slug>` или `exclude:<slug>` — фильтр датасета (не разбивает) |
-| `--author` | Slug AI-агента — обязателен для `agent_comments`, `feedback_rate`, `feedback_acceptance_rate` |
+| `--author` | Slug AI-агента — обязателен для `agent_comments`, `feedback_rate`, `feedback_acceptance_rate`, `merge_*` |
 | `--judge-model` | LLM-модель судьи (default из конфига, см. `judge.model`) |
 | `--output` | `.png`, `.svg` или `.html` (интерактивный plotly, для `trend`) |
+| `--explain` | Показать DSL-выражения для всех метрик и выйти (без обращения к БД) |
+| `--new-dsl` | Напечатать эквивалентную команду в форме `--dsl` (для шаринга и тонкой настройки) |
 
 **Режимы `--split` (repo-level — все PR одного репа уходят в одну когорту):**
 
