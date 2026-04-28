@@ -229,6 +229,7 @@ def _save_trend_html(
     layout: str,
     period_label: str,
     state: str,
+    axes_groups: list[list[str]] | None = None,
 ) -> bool:
     """Render trend chart as interactive HTML via plotly. Returns True on success."""
     try:
@@ -242,7 +243,56 @@ def _save_trend_html(
     COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
               "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
 
-    if n == 1 or layout == "stack":
+    if axes_groups:
+        # User-defined subplot grouping. Each group → one subplot; metrics in
+        # the group share the y-axis (overlay).
+        n_rows = len(axes_groups)
+        subplot_titles = [
+            " + ".join(METRICS[m].label for m in g) for g in axes_groups
+        ]
+        fig = make_subplots(
+            rows=n_rows, cols=1, shared_xaxes=True,
+            subplot_titles=subplot_titles, vertical_spacing=0.08,
+        )
+        for row_idx, group in enumerate(axes_groups, 1):
+            show_legend = (row_idx == 1)
+            for m_idx, mname in enumerate(group):
+                mdef = METRICS[mname]
+                dash = ["solid", "dash", "dot", "dashdot"][m_idx % 4]
+                for s_idx, (label, buckets) in enumerate(metric_results[mname]):
+                    xs = [bk for bk in sorted_buckets if bk in buckets]
+                    ys = [buckets[bk] for bk in xs]
+                    color = COLORS[s_idx % len(COLORS)]
+                    trace_name = f"{label} — {mdef.label}" if len(group) > 1 else label
+                    fig.add_trace(
+                        go.Scatter(
+                            x=xs, y=ys, name=trace_name,
+                            mode="lines+markers",
+                            line=dict(color=color, dash=dash),
+                            marker=dict(color=color),
+                            text=[mdef.fmt(y) for y in ys],
+                            hovertemplate="%{x}<br>%{text}<extra>" + trace_name + "</extra>",
+                            legendgroup=trace_name,
+                            showlegend=show_legend,
+                        ),
+                        row=row_idx, col=1,
+                    )
+            # Use first metric's log_scale flag for the row (mixed metrics
+            # in one axes is the user's responsibility)
+            first_mdef = METRICS[group[0]]
+            fig.update_yaxes(
+                type="log" if first_mdef.log_scale else "-",
+                row=row_idx, col=1,
+            )
+        fig.update_layout(
+            title=f"by {period_label} ({state})",
+            height=max(400, 250 * n_rows + 100),
+            hovermode="x unified",
+        )
+        fig.write_html(str(out_path))
+        return True
+
+    elif n == 1 or layout == "stack":
         specs = [[{"secondary_y": False}]] * n
         subplot_titles = [METRICS[m].label for m in requested_metrics]
         fig = make_subplots(rows=n, cols=1, shared_xaxes=True,
@@ -899,7 +949,48 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     period_label = "Week" if period == "week" else "Month"
     w = max(10, len(sorted_buckets) * 0.8)
 
-    if n_metrics == 1:
+    # ── Explicit subplot grouping via --axes ──────────────────────────────
+    # `--axes "a,b"` (repeatable) defines per-subplot metric groups.
+    # Each group becomes one subplot; metrics within a group share the y-axis
+    # (overlay rendering, no twinx). Falls back to legacy --layout when not set.
+    axes_groups: list[list[str]] = []
+    for spec in (getattr(args, "axes", None) or []):
+        names = [m.strip() for m in spec.split(",") if m.strip()]
+        unknown = [m for m in names if m not in requested_metrics]
+        if unknown:
+            log.error("--axes references unknown metric(s) %s. Pass them via "
+                      "--metrics, --metric, or --dsl first.", unknown)
+            sys.exit(1)
+        axes_groups.append(names)
+    if axes_groups:
+        # Drop any metrics that weren't placed into a group (silently ignore —
+        # user may want them computed but not shown).
+        fig, axes_arr = plt.subplots(
+            len(axes_groups), 1,
+            figsize=(w, 4 * len(axes_groups)),
+            sharex=True,
+            squeeze=False,
+        )
+        axes_arr = [row[0] for row in axes_arr]
+        for ax, group in zip(axes_arr, axes_groups):
+            label_parts = []
+            for m_idx, mname in enumerate(group):
+                mdef = METRICS[mname]
+                # Vary linestyle per metric in the group so overlapping
+                # series-by-color stay distinguishable
+                ls_per_metric = ["-", "--", ":", "-."][m_idx % 4]
+                _draw_trend_ax(ax, metric_results[mname], sorted_buckets, mdef,
+                               colors, linestyles=[ls_per_metric] * len(metric_results[mname]))
+                label_parts.append(mdef.label)
+                if mdef.log_scale:
+                    ax.set_yscale("log")
+            ax.set_title(" + ".join(label_parts))
+            ax.legend(fontsize=8)
+        axes_arr[-1].set_xticks(range(len(sorted_buckets)))
+        axes_arr[-1].set_xticklabels(sorted_buckets, rotation=45, ha="right")
+        plt.tight_layout()
+
+    elif n_metrics == 1:
         # Single metric — simple plot
         fig, ax = plt.subplots(figsize=(w, 6))
         mname = requested_metrics[0]
@@ -985,7 +1076,8 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     out_path = Path(output)
     if out_path.suffix.lower() == ".html":
         ok = _save_trend_html(out_path, metric_results, sorted_buckets,
-                              requested_metrics, layout, period_label, state)
+                              requested_metrics, layout, period_label, state,
+                              axes_groups=axes_groups)
         if ok:
             plt.close(fig)
             print(f"Chart saved to {out_path}", flush=True)

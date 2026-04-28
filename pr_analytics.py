@@ -108,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--group-by", default=None, dest="group_by", choices=["project"],
                    help="Further split each series by attribute. Combines with --split: "
                         "--split reviewer:X --group-by project → N projects × 2 series")
+    p.add_argument("--axes", action="append", default=[],
+                   help="Explicit subplot grouping: --axes 'm1,m2' --axes 'm3' "
+                        "produces 2 subplots (m1+m2 overlay, m3 alone). Each "
+                        "--axes is one subplot; comma-separated metrics inside "
+                        "share that subplot's y-axis. Repeatable.")
     p.add_argument("--layout", default="stack", choices=["stack", "overlay"],
                    help="Layout when multiple metrics: stack (default) or overlay (dual y-axis, max 2 metrics)")
     p.add_argument("--author", default=None,
