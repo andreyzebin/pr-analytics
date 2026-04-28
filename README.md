@@ -428,8 +428,9 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 | `--state` | `MERGED` (по умолчанию), `DECLINED`, `OPEN` |
 | `--type` | `box` / `trend` / `points` / `json` |
 | `--metrics` | Comma-separated метрики для trend (default: `cycle_time`) |
-| `--metric` | Ad-hoc метрика `'label=<dsl-expr>'`, repeatable; auto-wrapped CLI-флагами |
-| `--dsl` | Полный DSL `'label=<dsl-expr>'` без auto-wrap, repeatable |
+| `--metric` | Ad-hoc метрика `'label=<dsl-expr>'`, repeatable; auto-wrapped CLI-флагами (`--period`, `--since`, `--split`, `--group-by`, `--state`, `--author`, ...) |
+| `--dsl` | Полный DSL `'label=<dsl-expr>'`, repeatable. **Var-only режим**: семантические CLI-флаги запрещены, значения через `--var` |
+| `--var` | `'name=value'` (repeatable) — задаёт DSL-переменную `$name`. Единственный способ передать значения в `--dsl` |
 | `--period` | `month` (по умолчанию) или `week` — для trend |
 | `--axes` | `'m1,m2'` — явная группировка метрик в subplot'ы; repeatable. Метрики внутри одной группы рисуются overlay'ом |
 | `--layout` | `stack` (subplot'ы, по умолчанию) или `overlay` (dual y-axis, только 2 метрики). Игнорируется при `--axes` |
@@ -504,11 +505,15 @@ period(week|month,
 | `field is null` / `field is not null` | NULL-проверки |
 | `(a and b)`, `(a or b)`, `not a` | Булева логика |
 
-**Переменные** (резолвятся из CLI):
-- `$state` ← `--state`
-- `$author` ← `--author`
-- `$judge_model` ← `--judge-model`
-- `$reviewer_slug`/`$commenter_slug` ← из `--split reviewer:slug`/`commenter:slug`
+**Переменные.** В `--metric` (auto-wrap) тянутся из CLI; в `--dsl` (var-only) — только из `--var name=value`:
+
+| Переменная | `--metric` | `--dsl` |
+|---|---|---|
+| `$state` | `--state` | `--var state=...` |
+| `$author` | `--author` | `--var author=...` |
+| `$judge_model` | `--judge-model` (или `judge.model` в config) | `--var judge_model=...` |
+| `$reviewer_slug` / `$commenter_slug` | `--split reviewer:slug`/`commenter:slug` | `--var reviewer_slug=...` |
+| произвольные (`$bot`, `$baseline_date`, ...) | — | `--var name=value` |
 
 **Источники (`@source`):**
 
@@ -539,25 +544,33 @@ period(week,
 )
 ```
 
-**`--metric "label=<expr>"`** — ad-hoc метрика поверх auto-wrap:
+**`--metric "label=<expr>"`** — ad-hoc метрика, **auto-wrap режим**: семантические CLI-флаги (`--period`/`--since`/`--until`/`--split`/`--group-by`/`--state`/`--author`/`--judge-model`) автоматически оборачиваются вокруг выражения метрики:
 
 ```bash
 plot --since 2026-04-01 --period week --group-by project --type json \
   --metric "Decline Rate=ratio(count(state='DECLINED'), count(state in ['MERGED','DECLINED']))"
 ```
 
-**`--dsl "label=<full-dsl>"`** — полный DSL без auto-wrap (метрика подаётся уже обёрнутой со всеми `period`/`range`/`@source`/`group`/`split`):
+**`--dsl "label=<full-dsl>"`** — полный DSL, **var-only режим**: семантические флаги ЗАПРЕЩЕНЫ (период/окно/группировка/split должны быть в самом DSL). Значения переменных подаются ТОЛЬКО через `--var name=value` (repeatable):
 
 ```bash
 plot --type json --metrics '' \
-  --dsl "merged_count=period(week, @pr(count(state='MERGED')))"
+  --var state=MERGED \
+  --dsl "merged_count=period(week, @pr(count(state=\$state)))"
 ```
 
-**`--new-dsl`** — печатает эквивалентную команду текущего вызова в форме `--dsl` (для шаринга, скриптов, тонкой настройки):
+Попытка использовать `--state`/`--since`/`--split`/etc вместе с `--dsl` — ошибка с сообщением «pass values via --var name=value instead».
+
+**`--new-dsl`** — печатает эквивалентную команду текущего вызова в форме `--dsl` + `--var`. Получается переиспользуемый шаблон: значения вынесены в `--var`-флаги, DSL содержит только `$name`-ссылки. Меняешь один `--var` — пересчитывается под другого агента/период/state без правки самого DSL.
 
 ```bash
-plot --since 2026-04-01 --period week --metrics adoption_rate --split reviewer:agent --group-by project --new-dsl
-# → выводит готовую к запуску plot ... --dsl "adoption_rate=..." команду
+plot --since 2026-04-01 --period week --metrics adoption_rate \
+     --split reviewer:ai-bot --group-by project --new-dsl
+# → выводит:
+#   plot --type 'box' \
+#        --var 'state=MERGED' --var 'author=...' --var 'reviewer_slug=ai-bot' \
+#        --metrics '' \
+#        --dsl 'adoption_rate=period(week, range(since=2026-04-01, @pr(group(...))))'
 ```
 
 ---
