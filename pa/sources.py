@@ -58,6 +58,7 @@ def comments_source(vars: dict) -> list[dict]:
     rows = conn.execute(f"""
         SELECT c.id, c.author, c.parent_id, c.file_path, c.severity,
                pr.closed_date, pr.state, pr.repo_id, pr.pr_id,
+               pr.reviewers, r.project_key,
                EXISTS (SELECT 1 FROM comment_reactions cr
                        WHERE cr.comment_id = c.id) AS has_reaction,
                EXISTS (SELECT 1 FROM pr_comments reply
@@ -65,6 +66,7 @@ def comments_source(vars: dict) -> list[dict]:
                        AS has_reply
         FROM pr_comments c
         JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+        JOIN repos r ON r.id = pr.repo_id
         WHERE pr.closed_date IS NOT NULL{where}
     """, params).fetchall()
     return [dict(r) for r in rows]
@@ -85,10 +87,11 @@ def analysis_source(vars: dict) -> list[dict]:
         return []
     rows = conn.execute(f"""
         SELECT ca.comment_id, c.author, ca.verdict, ca.judge_model,
-               pr.closed_date, pr.state, pr.repo_id, pr.pr_id
+               pr.closed_date, pr.state, pr.repo_id, pr.pr_id, pr.reviewers, r.project_key
         FROM comment_analysis ca
         JOIN pr_comments c ON c.id = ca.comment_id
         JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+        JOIN repos r ON r.id = pr.repo_id
         WHERE ca.judge_model = ? AND pr.closed_date IS NOT NULL{where}
     """, [judge_model] + params).fetchall()
     return [dict(r) for r in rows]
@@ -110,10 +113,11 @@ def merge_source(vars: dict) -> list[dict]:
     rows = conn.execute(f"""
         SELECT ma.comment_id, c.author, ma.verdict, ma.judge_model,
                ma.analyzer_version, pr.closed_date, pr.state,
-               pr.repo_id, pr.pr_id
+               pr.repo_id, pr.pr_id, pr.reviewers, r.project_key
         FROM merge_analysis ma
         JOIN pr_comments c ON c.id = ma.comment_id
         JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
+        JOIN repos r ON r.id = pr.repo_id
         WHERE ma.judge_model = ? AND pr.closed_date IS NOT NULL{where}
           AND ma.analyzed_at = (
               SELECT MAX(ma2.analyzed_at) FROM merge_analysis ma2

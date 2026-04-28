@@ -532,6 +532,26 @@ def substitute_vars(node, values: dict) -> object:
     return walk(node)
 
 
+def _apply_split_group(inner: Expr, split: str | None, group_by: str | None,
+                       skip_split: bool, default_per_repo: bool) -> Expr:
+    """Apply Split / Group around `inner` per CLI flags."""
+    if split and not skip_split:
+        if split.startswith("reviewer:"):
+            inner = Split("reviewer", Var("reviewer_slug"),
+                          Contains(Var("reviewer_slug"), "reviewers"), inner)
+        elif split.startswith("commenter:"):
+            inner = Split("commenter", Var("commenter_slug"),
+                          Contains(Var("commenter_slug"), "commenters"), inner)
+        # "total[:label]" — explicit single combined series, no wrap
+
+    if group_by == "project":
+        inner = Group("project_key", inner)
+    elif default_per_repo and not split and not skip_split:
+        # No CLI grouping at all → default to per-repo series.
+        inner = Group("repo_label", inner)
+    return inner
+
+
 def auto_wrap(expr: Expr, *, split: str | None = None, group_by: str | None = None,
               period: str | None = None, since: str | None = None,
               until: str | None = None, skip_split: bool = False) -> Expr:
@@ -541,31 +561,24 @@ def auto_wrap(expr: Expr, *, split: str | None = None, group_by: str | None = No
     Order, outermost first:
       Period → DateRange → @source → Group → Split → inner
 
-    Defaults when no CLI grouping is given:
-      - non-source, non-bypass metrics → Group("repo_label", inner)
-        (preserves the historical "one series per repo" behaviour)
-      - source metrics (already have @comments/@analysis/@merge) → no wrap
-      - bypass_split metrics with no --group-by → no wrap (single series)
-
-    `split` examples: "reviewer:slug", "commenter:slug", "total" (no wrap).
+    For source-bearing metrics (already containing `@comments`/`@analysis`/
+    `@merge`), Group/Split are inserted *inside* the existing FromSource so
+    the source's pre-fetched rows are partitioned (rather than the empty
+    outer rows). Default per-repo grouping is suppressed for source metrics
+    since their rows live in different tables and a "repo_label" is not
+    naturally available without extra joins — they emit a single series
+    unless --group-by is explicitly provided.
     """
-    has_source = _has_source(expr)
-    if not has_source:
-        if split and not skip_split:
-            if split.startswith("reviewer:"):
-                expr = Split("reviewer", Var("reviewer_slug"),
-                             Contains(Var("reviewer_slug"), "reviewers"), expr)
-            elif split.startswith("commenter:"):
-                expr = Split("commenter", Var("commenter_slug"),
-                             Contains(Var("commenter_slug"), "commenters"), expr)
-            # "total[:label]" — explicit single combined series, no wrap
-
-        if group_by == "project":
-            expr = Group("project_key", expr)
-        elif not split and not skip_split:
-            # No CLI grouping at all → default to per-repo series.
-            expr = Group("repo_label", expr)
-
+    if isinstance(expr, FromSource):
+        # Insert Split/Group between the source and its inner aggregator.
+        new_inner = _apply_split_group(
+            expr.inner, split, group_by, skip_split, default_per_repo=False,
+        )
+        expr = FromSource(expr.source, new_inner)
+    else:
+        expr = _apply_split_group(
+            expr, split, group_by, skip_split, default_per_repo=True,
+        )
         # Surface @pr explicitly so --explain shows row provenance.
         from pa.sources import pr_source
         expr = FromSource(pr_source, expr)

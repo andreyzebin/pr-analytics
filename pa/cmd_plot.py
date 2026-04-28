@@ -411,6 +411,9 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             if defaults.get(attr) == value:
                 continue  # default — skip
             passthrough_pairs.append(f"{cli_flag} {_sh_quote(str(value))}")
+        # --axes is repeatable — emit one passthrough flag per group
+        for axes_spec in (getattr(args, "axes", None) or []):
+            passthrough_pairs.append(f"--axes {_sh_quote(axes_spec)}")
 
         # Bake CLI-provided values into the DSL so the emitted command is
         # self-contained (no $reviewer_slug / $state placeholders).
