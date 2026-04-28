@@ -372,46 +372,60 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
   --type points
 
 # Несколько метрик на разных subplot'ах через --axes (одна группа = одна subplot)
-# Adoption по проектам сверху, merge-acceptance по тем же проектам снизу:
+# Adoption / feedback-acceptance / merge-acceptance по проектам, по неделям:
 .venv/bin/python pr_analytics.py plot \
   --since 2026-01-01 --state MERGED \
-  --type trend --period month \
+  --type trend --period week \
   --author ai-review-bot --judge-model deepseek-chat \
   --split reviewer:ai-review-bot \
-  --metrics adoption_rate,merge_acceptance_rate \
+  --metrics adoption_rate,feedback_acceptance_rate,merge_acceptance_rate \
   --group-by project \
   --projects PROJ1,PROJ2,PROJ3,PROJ4 \
-  --axes "adoption_rate" --axes "merge_acceptance_rate" \
-  --output output/dual.html
+  --axes "adoption_rate" \
+  --axes "feedback_acceptance_rate" \
+  --axes "merge_acceptance_rate" \
+  --output output/triple.html
 
-# Эквивалентная команда в DSL-форме (вывод --new-dsl):
-# Семантика (period/range/split/group) внутри DSL; значения пробрасываются через --var.
+# То же самое в чистой DSL-форме (вывод --new-dsl).
+# `$bot` — кастомная переменная (не привязана к --author/--split), задаётся
+# одним --var и используется во всех местах. Дата — литерал в range().
+# merge_acceptance_rate без split — split(reviewer:$bot) бесполезен,
+# когда агент пишет комменты но не в формальных ревьюерах PR.
 .venv/bin/python pr_analytics.py plot \
-  --type 'trend' --output 'output/dual.html' \
+  --type 'trend' --output 'output/triple.html' \
   --projects 'PROJ1,PROJ2,PROJ3,PROJ4' \
-  --axes 'adoption_rate' --axes 'merge_acceptance_rate' \
+  --axes 'adoption_rate' \
+  --axes 'feedback_acceptance_rate' \
+  --axes 'merge_acceptance_rate' \
   --var 'state=MERGED' \
-  --var 'author=ai-review-bot' \
+  --var 'bot=ai-review-bot' \
   --var 'judge_model=deepseek-chat' \
-  --var 'reviewer_slug=ai-review-bot' \
   --metrics '' \
   --dsl 'adoption_rate=
-    period(month, range(since=2026-01-01,
+    period(week, range(since=2026-01-01,
       @pr(group(project_key,
         ratio(
-          count((state=$state and ($reviewer_slug in reviewers or $commenter_slug in commenters)), @created_date),
+          count((state=$state and ($bot in reviewers or $bot in commenters)), @created_date),
           count(state=$state, @created_date),
         ),
       ))))' \
-  --dsl 'merge_acceptance_rate=
-    period(month, range(since=2026-01-01,
-      @merge(group(project_key, split(reviewer:$reviewer_slug,
+  --dsl 'feedback_acceptance_rate=
+    period(week, range(since=2026-01-01,
+      @analysis(group(project_key,
         ratio(
-          (count((verdict="YES" and author=$author))
-           + (0.5 * count((verdict="PARTIAL" and author=$author)))),
-          count((verdict in ["YES","PARTIAL","NO"] and author=$author)),
+          count((verdict="yes" and author=$bot)),
+          count((verdict in ["yes","no"] and author=$bot)),
         ),
-      )))))'
+      ))))' \
+  --dsl 'merge_acceptance_rate=
+    period(week, range(since=2026-01-01,
+      @merge(group(project_key,
+        ratio(
+          (count((verdict="YES" and author=$bot))
+           + (0.5 * count((verdict="PARTIAL" and author=$bot)))),
+          count((verdict in ["YES","PARTIAL","NO"] and author=$bot)),
+        ),
+      ))))'
 ```
 
 **Контракт `--dsl`:**
