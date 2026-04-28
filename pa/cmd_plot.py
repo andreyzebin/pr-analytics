@@ -616,9 +616,9 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
         per_pr_metrics  = [m for m in requested_metrics if METRICS[m].row_value is not None]
         aggregated_metrics = [m for m in requested_metrics
-                              if METRICS[m].row_value is None and METRICS[m].compute is not None]
+                              if METRICS[m].row_value is None and METRICS[m].expr is not None]
         skipped = [m for m in requested_metrics
-                   if METRICS[m].row_value is None and METRICS[m].compute is None]
+                   if METRICS[m].row_value is None and METRICS[m].expr is None]
         if skipped:
             log.warning("--type points doesn't support metrics: %s", ", ".join(skipped))
 
@@ -650,8 +650,22 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             if aggregated_metrics:
                 all_buckets: set[str] = set()
                 agg_data: dict[str, dict[str, float]] = {}
+                vars_for_eval = {
+                    "state": state,
+                    "author": getattr(args, "author", None),
+                    "judge_model": resolve_judge_model(
+                        getattr(args, "judge_model", None), cfg),
+                    "reviewer_slug": (split_arg.split(":", 1)[1]
+                                      if split_arg and split_arg.startswith("reviewer:") else None),
+                    "commenter_slug": (split_arg.split(":", 1)[1]
+                                       if split_arg and split_arg.startswith("commenter:") else None),
+                    "_pr_rows": series.rows,
+                    "_conn": conn,
+                    "_since_ts": since_ts,
+                    "_until_ts": until_ts,
+                }
                 for mname in aggregated_metrics:
-                    buckets = METRICS[mname].compute(series.rows, period, state)
+                    buckets = METRICS[mname].expr.eval(series.rows, period, vars_for_eval)
                     agg_data[mname] = buckets
                     all_buckets.update(buckets.keys())
 

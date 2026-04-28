@@ -23,12 +23,12 @@ def pr_source(vars: dict) -> list[dict]:
     return list(vars.get("_pr_rows") or [])
 
 
-def _ctx(vars: dict) -> tuple[Any, list]:
+def _ctx(vars: dict) -> tuple[Any, tuple[str, list]]:
     """Pull conn + WHERE clauses bound to context (since/until/repos)."""
     conn = vars.get("_conn")
     if conn is None:
-        # If no conn is supplied (e.g., in unit tests), return empty.
-        return None, []
+        # If no conn is supplied (e.g., in unit tests), return a no-op.
+        return None, ("", [])
     extra: list[str] = []
     params: list[Any] = []
     if vars.get("_since_ts"):
