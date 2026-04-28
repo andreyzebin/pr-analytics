@@ -66,7 +66,8 @@ class LLMJudge:
                  tool_choice: str | None = None,
                  extra_body: dict | None = None,
                  max_tokens: int | None = None,
-                 no_temperature: bool = False):
+                 no_temperature: bool = False,
+                 timeout: float = 90.0):
         self._model = model
         self._api_key = api_key
         self._base_url = base_url    # None → Anthropic; str → OpenAI-compatible
@@ -74,6 +75,7 @@ class LLMJudge:
         self._extra_body = extra_body  # e.g. {"chat_template_kwargs": {"enable_thinking": False}}
         self._cfg_max_tokens = max_tokens
         self._no_temperature = no_temperature
+        self._timeout = timeout
 
     def judge(self, prompt: str) -> JudgeVerdict:
         verdict, _ = self.judge_raw(prompt)
@@ -121,7 +123,8 @@ class LLMJudge:
 
         if self._base_url:
             from openai import OpenAI
-            client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+            client = OpenAI(api_key=self._api_key, base_url=self._base_url,
+                            timeout=self._timeout)
             kwargs: dict = dict(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
@@ -136,7 +139,8 @@ class LLMJudge:
             return resp.choices[0].message.content or "", tokens
         else:
             import anthropic
-            client = anthropic.Anthropic(api_key=self._api_key)
+            client = anthropic.Anthropic(api_key=self._api_key,
+                                         timeout=self._timeout)
             msg = client.messages.create(
                 model=self._model,
                 max_tokens=max_tokens,
@@ -151,7 +155,8 @@ class LLMJudge:
     def _call_with_tool(self, prompt: str, tool: dict) -> tuple[dict, int]:
         """Call LLM with function calling, return (parsed_args_dict, tokens)."""
         from openai import OpenAI
-        client = OpenAI(api_key=self._api_key, base_url=self._base_url)
+        client = OpenAI(api_key=self._api_key, base_url=self._base_url,
+                        timeout=self._timeout)
         model_lower = self._model.lower()
         is_reasoner = "reasoner" in model_lower or "-r1" in model_lower
         max_tokens = self._cfg_max_tokens or (4096 if is_reasoner else 1024)
@@ -234,6 +239,8 @@ def build_judge(model: str, api_key: str, base_url: str | None, cfg: dict) -> "L
         resolve_judge_max_tokens,
         resolve_judge_no_temperature,
     )
+    judge_cfg = cfg.get("judge", {}) if isinstance(cfg, dict) else {}
+    timeout = float(judge_cfg.get("timeout", 90.0))
     return LLMJudge(
         model=model,
         api_key=api_key,
@@ -242,4 +249,5 @@ def build_judge(model: str, api_key: str, base_url: str | None, cfg: dict) -> "L
         extra_body=resolve_judge_extra_body(cfg),
         max_tokens=resolve_judge_max_tokens(cfg),
         no_temperature=resolve_judge_no_temperature(cfg),
+        timeout=timeout,
     )
