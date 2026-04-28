@@ -751,18 +751,27 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             if mdef.expr is None:
                 log.warning("--type points: %r has no expr; skipped", mname)
                 continue
-            wrapped = auto_wrap(
-                mdef.expr, split=split_arg, group_by=group_by, period=period,
-                since=getattr(args, "since", None),
-                until=getattr(args, "until", None),
-                skip_split=mdef.bypass_split,
-            )
+            if mname in full_dsl_metric_names:
+                wrapped = mdef.expr  # --dsl metric is already final
+            else:
+                wrapped = auto_wrap(
+                    mdef.expr, split=split_arg, group_by=group_by, period=period,
+                    since=getattr(args, "since", None),
+                    until=getattr(args, "until", None),
+                    skip_split=mdef.bypass_split,
+                )
             results = wrapped.eval_series(all_rows, period, dsl_vars)
 
             print(f"\n{'─' * 60}")
-            print(f"  [{mname}]  ({mdef.label})")
+            display_name = (mdef.label
+                            if mname.startswith(("_ad_hoc_", "_full_dsl_"))
+                            else mname)
+            print(f"  [{display_name}]")
 
-            period_label = "week" if period == "week" else "month"
+            # Effective period: top-level Period() in the wrapped expr wins
+            # over the CLI default ("month").
+            eff_period = wrapped.period if isinstance(wrapped, Period) else period
+            period_label = "week" if eff_period == "week" else "month"
             for label, buckets in results:
                 if not buckets:
                     continue
