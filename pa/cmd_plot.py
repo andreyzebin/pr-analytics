@@ -254,7 +254,6 @@ def _save_trend_html(
     state: str,
     axes_groups: list[list[str]] | None = None,
     ratio_components: dict[str, dict[str, dict[str, tuple]]] | None = None,
-    metric_dsl_text: dict[str, str] | None = None,
 ) -> bool:
     """Render trend chart as interactive HTML via plotly. Returns True on success."""
     try:
@@ -282,11 +281,7 @@ def _save_trend_html(
         from pa.dsl import has_mean
         # legend_seen: dedup per (metric, series-label) so the same series
         # appearing in multiple subplots gets one legend entry.
-        # legend_title_seen: emit the per-metric DSL formula only once
-        # (on the first trace of each metric — plotly's legendgrouptitle
-        # is a per-legendgroup property and last-write-wins anyway).
         legend_seen: set[str] = set()
-        legend_title_seen: set[str] = set()
         for row_idx, group in enumerate(axes_groups, 1):
             for m_idx, mname in enumerate(group):
                 mdef = METRICS[mname]
@@ -295,27 +290,11 @@ def _save_trend_html(
                 width = 4 if is_mean else 2
                 comps_for_metric = (ratio_components or {}).get(mname, {})
 
-                # Build the per-metric formula HTML (small monospace) — shown
-                # as legendgrouptitle so it sits with the metric in the legend
-                # itself, no extra real-estate consumed.
-                grouptitle = None
-                if mname not in legend_title_seen and metric_dsl_text and metric_dsl_text.get(mname):
-                    legend_title_seen.add(mname)
-                    ft = metric_dsl_text[mname]
-                    ft = ft.replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
-                    grouptitle = dict(
-                        text=(f"<b>{mdef.label}</b>"
-                              f"<br><span style='font-family:monospace;font-size:9px;color:#666'>{ft}</span>"),
-                        font=dict(size=10),
-                    )
-
                 for s_idx, (label, buckets) in enumerate(metric_results[mname]):
                     xs = [bk for bk in sorted_buckets if bk in buckets]
                     ys = [buckets[bk] for bk in xs]
                     color = "black" if is_mean else COLORS[s_idx % len(COLORS)]
-                    trace_name = label
-                    # Group by metric so legendgrouptitle (formula) appears
-                    # once above the metric's projects in the legend.
+                    trace_name = f"{label} — {mdef.label}" if len(group) > 1 else label
                     seen_key = f"{mname}::{label}"
                     show_legend = seen_key not in legend_seen
                     legend_seen.add(seen_key)
@@ -333,7 +312,7 @@ def _save_trend_html(
                         custom = None
                         text = [mdef.fmt(y) for y in ys]
 
-                    trace_kwargs = dict(
+                    fig.add_trace(go.Scatter(
                         x=xs, y=ys, name=trace_name,
                         mode="lines+markers",
                         line=dict(color=color, dash=dash, width=width),
@@ -341,13 +320,9 @@ def _save_trend_html(
                         text=text,
                         customdata=custom,
                         hovertemplate=f"%{{x}}<br>%{{text}}<extra>{trace_name}</extra>",
-                        legendgroup=mname,
+                        legendgroup=seen_key,
                         showlegend=show_legend,
-                    )
-                    if grouptitle is not None and show_legend:
-                        trace_kwargs["legendgrouptitle"] = grouptitle
-                        grouptitle = None  # only attach once per metric
-                    fig.add_trace(go.Scatter(**trace_kwargs), row=row_idx, col=1)
+                    ), row=row_idx, col=1)
             # Use first metric's log_scale flag for the row (mixed metrics
             # in one axes is the user's responsibility)
             first_mdef = METRICS[group[0]]
@@ -993,12 +968,8 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     #   - hover tooltips in plotly (`42% (10 / 24)`)
     #   - JSON output (extra `components` field per bucket)
     #   - --type points text rendering (appends `(num/den)` to value)
-    from pa.dsl import find_outer_ratio, replace_ratio, format_expr, substitute_vars
+    from pa.dsl import find_outer_ratio, replace_ratio
     ratio_components: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
-    # Per-metric formatted DSL (with $vars resolved to literals) — surfaced
-    # in the HTML chart as right-margin annotations so the reader can see
-    # the exact formula being rendered.
-    metric_dsl_text: dict[str, str] = {}
 
     for metric_name in requested_metrics:
         mdef = METRICS[metric_name]
@@ -1014,12 +985,6 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 since=getattr(args, "since", None), until=getattr(args, "until", None),
                 skip_split=mdef.bypass_split,
             )
-
-        # Bake user-visible vars into the displayed DSL so the formula is
-        # self-explanatory — no $-references the reader has to mentally resolve.
-        bake = {k: v for k, v in dsl_vars.items()
-                if not k.startswith("_") and v is not None}
-        metric_dsl_text[metric_name] = format_expr(substitute_vars(wrapped, bake))
         # Source metrics ignore input rows; non-source need all_rows for
         # Group/Split partitioning.
         results = wrapped.eval_series(all_rows, period, dsl_vars)
@@ -1302,8 +1267,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         ok = _save_trend_html(out_path, metric_results, sorted_buckets,
                               requested_metrics, layout, period_label, state,
                               axes_groups=axes_groups,
-                              ratio_components=ratio_components,
-                              metric_dsl_text=metric_dsl_text)
+                              ratio_components=ratio_components)
         if ok:
             plt.close(fig)
             print(f"Chart saved to {out_path}", flush=True)
