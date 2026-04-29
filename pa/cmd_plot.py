@@ -270,8 +270,11 @@ def _save_trend_html(
             subplot_titles=subplot_titles, vertical_spacing=0.08,
         )
         from pa.dsl import has_mean
+        # Track each (legendgroup) we've already added so subsequent subplots
+        # with the same series share a single legend entry instead of either
+        # spamming duplicates or hiding the legend entirely after the first row.
+        legend_seen: set[str] = set()
         for row_idx, group in enumerate(axes_groups, 1):
-            show_legend = (row_idx == 1)
             for m_idx, mname in enumerate(group):
                 mdef = METRICS[mname]
                 is_mean = mdef.expr is not None and has_mean(mdef.expr)
@@ -282,6 +285,11 @@ def _save_trend_html(
                     ys = [buckets[bk] for bk in xs]
                     color = "black" if is_mean else COLORS[s_idx % len(COLORS)]
                     trace_name = f"{label} — {mdef.label}" if len(group) > 1 else label
+                    # Group by (label, metric) so the same series across subplots
+                    # toggles together and shows only one legend entry.
+                    lg = f"{mname}::{label}"
+                    show_legend = lg not in legend_seen
+                    legend_seen.add(lg)
                     fig.add_trace(
                         go.Scatter(
                             x=xs, y=ys, name=trace_name,
@@ -290,7 +298,7 @@ def _save_trend_html(
                             marker=dict(color=color),
                             text=[mdef.fmt(y) for y in ys],
                             hovertemplate="%{x}<br>%{text}<extra>" + trace_name + "</extra>",
-                            legendgroup=trace_name,
+                            legendgroup=lg,
                             showlegend=show_legend,
                         ),
                         row=row_idx, col=1,
