@@ -280,10 +280,13 @@ def _save_trend_html(
             subplot_titles=subplot_titles, vertical_spacing=0.08,
         )
         from pa.dsl import has_mean
-        # Track each (legendgroup) we've already added so subsequent subplots
-        # with the same series share a single legend entry instead of either
-        # spamming duplicates or hiding the legend entirely after the first row.
+        # legend_seen: dedup per (metric, series-label) so the same series
+        # appearing in multiple subplots gets one legend entry.
+        # legend_title_seen: emit the per-metric DSL formula only once
+        # (on the first trace of each metric — plotly's legendgrouptitle
+        # is a per-legendgroup property and last-write-wins anyway).
         legend_seen: set[str] = set()
+        legend_title_seen: set[str] = set()
         for row_idx, group in enumerate(axes_groups, 1):
             for m_idx, mname in enumerate(group):
                 mdef = METRICS[mname]
@@ -291,17 +294,32 @@ def _save_trend_html(
                 dash = "dash" if is_mean else ["solid", "dash", "dot", "dashdot"][m_idx % 4]
                 width = 4 if is_mean else 2
                 comps_for_metric = (ratio_components or {}).get(mname, {})
+
+                # Build the per-metric formula HTML (small monospace) — shown
+                # as legendgrouptitle so it sits with the metric in the legend
+                # itself, no extra real-estate consumed.
+                grouptitle = None
+                if mname not in legend_title_seen and metric_dsl_text and metric_dsl_text.get(mname):
+                    legend_title_seen.add(mname)
+                    ft = metric_dsl_text[mname]
+                    ft = ft.replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+                    grouptitle = dict(
+                        text=(f"<b>{mdef.label}</b>"
+                              f"<br><span style='font-family:monospace;font-size:9px;color:#666'>{ft}</span>"),
+                        font=dict(size=10),
+                    )
+
                 for s_idx, (label, buckets) in enumerate(metric_results[mname]):
                     xs = [bk for bk in sorted_buckets if bk in buckets]
                     ys = [buckets[bk] for bk in xs]
                     color = "black" if is_mean else COLORS[s_idx % len(COLORS)]
-                    trace_name = f"{label} — {mdef.label}" if len(group) > 1 else label
-                    lg = f"{mname}::{label}"
-                    show_legend = lg not in legend_seen
-                    legend_seen.add(lg)
+                    trace_name = label
+                    # Group by metric so legendgrouptitle (formula) appears
+                    # once above the metric's projects in the legend.
+                    seen_key = f"{mname}::{label}"
+                    show_legend = seen_key not in legend_seen
+                    legend_seen.add(seen_key)
 
-                    # Ratio metrics get (num, den) per bucket as customdata,
-                    # surfaced in the hover tooltip as e.g. "42% (10 / 24)".
                     series_comps = comps_for_metric.get(label, {})
                     if series_comps:
                         custom = [list(series_comps.get(bk, (None, None))) for bk in xs]
@@ -315,30 +333,21 @@ def _save_trend_html(
                         custom = None
                         text = [mdef.fmt(y) for y in ys]
 
-                    # DSL formula appended to extra-info side of hover tooltip
-                    # (kept on legend hover too via hoverlabel.namelength)
-                    formula_html = ""
-                    if metric_dsl_text and metric_dsl_text.get(mname):
-                        ft = metric_dsl_text[mname]
-                        ft = ft.replace("<", "&lt;").replace(">", "&gt;")
-                        ft = ft.replace("\n", "<br>")
-                        formula_html = f"<br><span style='font-family:monospace;font-size:9px;color:#888'>{ft}</span>"
-
-                    fig.add_trace(
-                        go.Scatter(
-                            x=xs, y=ys, name=trace_name,
-                            mode="lines+markers",
-                            line=dict(color=color, dash=dash, width=width),
-                            marker=dict(color=color),
-                            text=text,
-                            customdata=custom,
-                            hovertemplate=("%{x}<br>%{text}"
-                                           "<extra>" + trace_name + formula_html + "</extra>"),
-                            legendgroup=lg,
-                            showlegend=show_legend,
-                        ),
-                        row=row_idx, col=1,
+                    trace_kwargs = dict(
+                        x=xs, y=ys, name=trace_name,
+                        mode="lines+markers",
+                        line=dict(color=color, dash=dash, width=width),
+                        marker=dict(color=color),
+                        text=text,
+                        customdata=custom,
+                        hovertemplate=f"%{{x}}<br>%{{text}}<extra>{trace_name}</extra>",
+                        legendgroup=mname,
+                        showlegend=show_legend,
                     )
+                    if grouptitle is not None and show_legend:
+                        trace_kwargs["legendgrouptitle"] = grouptitle
+                        grouptitle = None  # only attach once per metric
+                    fig.add_trace(go.Scatter(**trace_kwargs), row=row_idx, col=1)
             # Use first metric's log_scale flag for the row (mixed metrics
             # in one axes is the user's responsibility)
             first_mdef = METRICS[group[0]]
