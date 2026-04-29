@@ -197,16 +197,24 @@ def _draw_trend_ax(
     colors: list[str],
     linestyles: list[str] | None = None,
     is_mean: bool = False,
+    is_weighted: bool = False,
 ) -> None:
     """Draw one metric on one axes. series_data = [(label, {bucket: value})].
 
-    When `is_mean` is True the metric is rendered as a "baseline overlay":
-    bold dashed line in a neutral colour (grey/black), so the average sits
-    on top of per-group lines clearly distinct."""
+    Style rules:
+      - is_mean      → bold black dashed (project-equal-weight average)
+      - is_weighted  → thin gray dotted (PR/comment volume-weighted average)
+      - otherwise    → per-series colored, default linestyle.
+    """
     for idx, (label, buckets) in enumerate(series_data):
-        color = "black" if is_mean else colors[idx % len(colors)]
-        ls = "--" if is_mean else (linestyles[idx % len(linestyles)] if linestyles else "-")
-        lw = 3.0 if is_mean else 1.5
+        if is_mean:
+            color, ls, lw = "black", "--", 3.0
+        elif is_weighted:
+            color, ls, lw = "#888888", ":", 1.0
+        else:
+            color = colors[idx % len(colors)]
+            ls = linestyles[idx % len(linestyles)] if linestyles else "-"
+            lw = 1.5
 
         x_pos = [i for i, bk in enumerate(sorted_buckets) if bk in buckets]
         y_vals = [buckets[bk] for bk in sorted_buckets if bk in buckets]
@@ -278,16 +286,23 @@ def _save_trend_html(
             rows=n_rows, cols=1, shared_xaxes=True,
             subplot_titles=subplot_titles, vertical_spacing=0.08,
         )
-        from pa.dsl import has_mean
+        from pa.dsl import has_mean, has_weighted
         # legend_seen: dedup per (metric, series-label) so the same series
         # appearing in multiple subplots gets one legend entry.
         legend_seen: set[str] = set()
         for row_idx, group in enumerate(axes_groups, 1):
             for m_idx, mname in enumerate(group):
                 mdef = METRICS[mname]
-                is_mean = mdef.expr is not None and has_mean(mdef.expr)
-                dash = "dash" if is_mean else ["solid", "dash", "dot", "dashdot"][m_idx % 4]
-                width = 4 if is_mean else 2
+                expr = mdef.expr
+                is_mean = expr is not None and has_mean(expr)
+                is_weighted = expr is not None and has_weighted(expr) and not is_mean
+                if is_mean:
+                    dash, width = "dash", 4
+                elif is_weighted:
+                    dash, width = "dot", 1
+                else:
+                    dash = ["solid", "dash", "dot", "dashdot"][m_idx % 4]
+                    width = 2
                 comps_for_metric = (ratio_components or {}).get(mname, {})
 
                 for s_idx, (label, buckets) in enumerate(metric_results[mname]):
@@ -1161,15 +1176,17 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             squeeze=False,
         )
         axes_arr = [row[0] for row in axes_arr]
-        from pa.dsl import has_mean
+        from pa.dsl import has_mean, has_weighted
         for ax, group in zip(axes_arr, axes_groups):
             label_parts = []
             for m_idx, mname in enumerate(group):
                 mdef = METRICS[mname]
                 ls_per_metric = ["-", "--", ":", "-."][m_idx % 4]
+                expr = mdef.expr
                 _draw_trend_ax(ax, metric_results[mname], sorted_buckets, mdef,
                                colors, linestyles=[ls_per_metric] * len(metric_results[mname]),
-                               is_mean=mdef.expr is not None and has_mean(mdef.expr))
+                               is_mean=expr is not None and has_mean(expr),
+                               is_weighted=expr is not None and has_weighted(expr) and not has_mean(expr))
                 label_parts.append(mdef.label)
                 if mdef.log_scale:
                     ax.set_yscale("log")

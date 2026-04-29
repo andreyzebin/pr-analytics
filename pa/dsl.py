@@ -492,6 +492,27 @@ class Mean(Expr):
 
 
 @dataclass
+class Weighted(Expr):
+    """Pass-through marker: tells the renderer to draw inner as a thin
+    dotted overlay. Semantically a no-op — inner is evaluated as-is.
+
+    Use case: pair with a global (un-grouped) ratio, e.g.
+
+        weighted(ratio(count(...), count(...)))
+
+    Result is volume-weighted (PR-counts/comments-counts dominate), unlike
+    `mean(project_key, ratio(...))` which gives every project equal weight.
+    """
+    inner: Expr
+
+    def eval(self, rows, period, vars):
+        return self.inner.eval(rows, period, vars)
+
+    def eval_series(self, rows, period, vars):
+        return self.inner.eval_series(rows, period, vars)
+
+
+@dataclass
 class Split(Expr):
     """Repo-level cohort split. Two cohorts emitted:
        + : repos with ≥1 row matching the predicate (in --state if given)
@@ -605,8 +626,20 @@ def has_mean(e) -> bool:
         return True
     if isinstance(e, BinOp):
         return has_mean(e.left) or has_mean(e.right)
-    if isinstance(e, (Group, Split, FromSource, Period, DateRange)):
+    if isinstance(e, (Group, Split, FromSource, Period, DateRange, Weighted)):
         return has_mean(e.inner)
+    return False
+
+
+def has_weighted(e) -> bool:
+    """True if the expression is wrapped in Weighted — renderer draws a thin
+    dotted overlay (volume-weighted average, vs Mean's project-equal weight)."""
+    if isinstance(e, Weighted):
+        return True
+    if isinstance(e, BinOp):
+        return has_weighted(e.left) or has_weighted(e.right)
+    if isinstance(e, (Group, Split, FromSource, Period, DateRange, Mean)):
+        return has_weighted(e.inner)
     return False
 
 
@@ -766,6 +799,9 @@ def _fmt_inline(e) -> str:
     if isinstance(e, Mean):
         return f"mean({e.field}, {_fmt_inline(e.inner)})"
 
+    if isinstance(e, Weighted):
+        return f"weighted({_fmt_inline(e.inner)})"
+
     if isinstance(e, Split):
         return f"split({e.kind}:{_fmt_val(e.slug)}, {_fmt_inline(e.inner)})"
 
@@ -837,6 +873,11 @@ def format_expr(e, indent: int = 0) -> str:
 
     if isinstance(e, Mean):
         return (f"{pad}mean({e.field},\n"
+                f"{format_expr(e.inner, indent + 1)},\n"
+                f"{pad})")
+
+    if isinstance(e, Weighted):
+        return (f"{pad}weighted(\n"
                 f"{format_expr(e.inner, indent + 1)},\n"
                 f"{pad})")
 

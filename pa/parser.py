@@ -44,7 +44,7 @@ from typing import Any
 from pa.dsl import (
     And, BinOp, Const, Contains, Count, CountDistinct, DateRange, Eq, Expr,
     Filter, FromSource, Group, In, IsNotNull, Mean, Median, Not, Or, Period,
-    Ratio, RowBinOp, RowConst, RowExpr, RowField, Split, Sum, Var,
+    Ratio, RowBinOp, RowConst, RowExpr, RowField, Split, Sum, Var, Weighted,
 )
 from pa.sources import analysis_source, comments_source, merge_source, pr_source
 
@@ -202,6 +202,8 @@ class Parser:
             return self._call_group()
         if name == "mean":
             return self._call_mean()
+        if name == "weighted":
+            return self._call_weighted()
         if name == "split":
             return self._call_split()
         if name == "range":
@@ -236,6 +238,13 @@ class Parser:
         self.accept("OP", ",")
         self._eat_close()
         return Mean(field, inner)
+
+    def _call_weighted(self) -> Expr:
+        # weighted(expr)  — render-style marker, semantically pass-through
+        inner = self.expr()
+        self.accept("OP", ",")
+        self._eat_close()
+        return Weighted(inner)
 
     def _call_split(self) -> Expr:
         # split(kind:value, predicate, expr)  or  split(kind:value, expr)
