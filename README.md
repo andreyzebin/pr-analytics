@@ -437,10 +437,10 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
     period(week, range(since=2026-01-01,
       ratio(
         @merge(group(project_key,
-          (count((verdict="YES" and author=$bot), @created_date)
-           + (0.5 * count((verdict="PARTIAL" and author=$bot), @created_date))))),
+          (count((verdict="YES" and author=$bot and state=$state), @created_date)
+           + (0.5 * count((verdict="PARTIAL" and author=$bot and state=$state), @created_date))))),
         @comments(group(project_key,
-          count((author=$bot and parent_id=null and file_path is not null), @created_date))),
+          count((author=$bot and parent_id=null and file_path is not null and state=$state), @created_date))),
       )))'
 ```
 
