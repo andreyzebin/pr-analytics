@@ -432,6 +432,29 @@ class Group(Expr):
 
 
 @dataclass
+class Mean(Expr):
+    """Partition rows by row[field], evaluate inner per partition, then
+    return the arithmetic mean of inner's bucket values across partitions
+    (single series). The dual of Group: Group emits N series, Mean emits 1."""
+    field: str
+    inner: Expr
+
+    def eval(self, rows, period, vars):
+        partitions: dict[str, list] = {}
+        for r in rows:
+            partitions.setdefault(r.get(self.field, ""), []).append(r)
+        per_bucket: dict[str, list[float]] = {}
+        for prows in partitions.values():
+            buckets = self.inner.eval(prows, period, vars)
+            for bk, v in buckets.items():
+                per_bucket.setdefault(bk, []).append(v)
+        return {bk: sum(vs) / len(vs) for bk, vs in per_bucket.items() if vs}
+
+    def eval_series(self, rows, period, vars):
+        return [("", self.eval(rows, period, vars))]
+
+
+@dataclass
 class Split(Expr):
     """Repo-level cohort split. Two cohorts emitted:
        + : repos with ≥1 row matching the predicate (in --state if given)
@@ -502,8 +525,20 @@ def _has_source(e) -> bool:
         return True
     if isinstance(e, BinOp):
         return _has_source(e.left) or _has_source(e.right)
-    if isinstance(e, (Group, Split)):
+    if isinstance(e, (Group, Split, Mean, Period, DateRange)):
         return _has_source(e.inner)
+    return False
+
+
+def has_mean(e) -> bool:
+    """True if the expression collapses groups via Mean — used by the renderer
+    to draw such series with a bold dashed style ("baseline overlay")."""
+    if isinstance(e, Mean):
+        return True
+    if isinstance(e, BinOp):
+        return has_mean(e.left) or has_mean(e.right)
+    if isinstance(e, (Group, Split, FromSource, Period, DateRange)):
+        return has_mean(e.inner)
     return False
 
 
@@ -660,6 +695,9 @@ def _fmt_inline(e) -> str:
     if isinstance(e, Group):
         return f"group({e.field}, {_fmt_inline(e.inner)})"
 
+    if isinstance(e, Mean):
+        return f"mean({e.field}, {_fmt_inline(e.inner)})"
+
     if isinstance(e, Split):
         return f"split({e.kind}:{_fmt_val(e.slug)}, {_fmt_inline(e.inner)})"
 
@@ -726,6 +764,11 @@ def format_expr(e, indent: int = 0) -> str:
 
     if isinstance(e, Group):
         return (f"{pad}group({e.field},\n"
+                f"{format_expr(e.inner, indent + 1)},\n"
+                f"{pad})")
+
+    if isinstance(e, Mean):
+        return (f"{pad}mean({e.field},\n"
                 f"{format_expr(e.inner, indent + 1)},\n"
                 f"{pad})")
 

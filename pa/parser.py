@@ -43,8 +43,8 @@ from typing import Any
 
 from pa.dsl import (
     And, BinOp, Const, Contains, Count, CountDistinct, DateRange, Eq, Expr,
-    Filter, FromSource, Group, In, IsNotNull, Median, Not, Or, Period, Ratio,
-    RowBinOp, RowConst, RowExpr, RowField, Split, Sum, Var,
+    Filter, FromSource, Group, In, IsNotNull, Mean, Median, Not, Or, Period,
+    Ratio, RowBinOp, RowConst, RowExpr, RowField, Split, Sum, Var,
 )
 from pa.sources import analysis_source, comments_source, merge_source, pr_source
 
@@ -200,6 +200,8 @@ class Parser:
             return self._call_period()
         if name == "group":
             return self._call_group()
+        if name == "mean":
+            return self._call_mean()
         if name == "split":
             return self._call_split()
         if name == "range":
@@ -225,6 +227,15 @@ class Parser:
         self.accept("OP", ",")
         self._eat_close()
         return Group(field, inner)
+
+    def _call_mean(self) -> Expr:
+        # mean(field, expr)  — single-series average across partitions
+        field = self.expect("IDENT").value
+        self.expect("OP", ",")
+        inner = self.expr()
+        self.accept("OP", ",")
+        self._eat_close()
+        return Mean(field, inner)
 
     def _call_split(self) -> Expr:
         # split(kind:value, predicate, expr)  or  split(kind:value, expr)

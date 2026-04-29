@@ -188,11 +188,17 @@ def _draw_trend_ax(
     mdef: MetricDef,
     colors: list[str],
     linestyles: list[str] | None = None,
+    is_mean: bool = False,
 ) -> None:
-    """Draw one metric on one axes. series_data = [(label, {bucket: value})]."""
+    """Draw one metric on one axes. series_data = [(label, {bucket: value})].
+
+    When `is_mean` is True the metric is rendered as a "baseline overlay":
+    bold dashed line in a neutral colour (grey/black), so the average sits
+    on top of per-group lines clearly distinct."""
     for idx, (label, buckets) in enumerate(series_data):
-        color = colors[idx % len(colors)]
-        ls = linestyles[idx % len(linestyles)] if linestyles else "-"
+        color = "black" if is_mean else colors[idx % len(colors)]
+        ls = "--" if is_mean else (linestyles[idx % len(linestyles)] if linestyles else "-")
+        lw = 3.0 if is_mean else 1.5
 
         x_pos = [i for i, bk in enumerate(sorted_buckets) if bk in buckets]
         y_vals = [buckets[bk] for bk in sorted_buckets if bk in buckets]
@@ -207,7 +213,7 @@ def _draw_trend_ax(
                    width=w, color=color, alpha=0.7, label=label)
         else:
             ax.plot(x_pos, y_vals, marker="o", label=label,
-                    color=color, linewidth=1.5, linestyle=ls)
+                    color=color, linewidth=lw, linestyle=ls)
             for x, y in zip(x_pos, y_vals):
                 ax.annotate(mdef.fmt(y), xy=(x, y),
                             xytext=(0, 6), textcoords="offset points",
@@ -263,21 +269,24 @@ def _save_trend_html(
             rows=n_rows, cols=1, shared_xaxes=True,
             subplot_titles=subplot_titles, vertical_spacing=0.08,
         )
+        from pa.dsl import has_mean
         for row_idx, group in enumerate(axes_groups, 1):
             show_legend = (row_idx == 1)
             for m_idx, mname in enumerate(group):
                 mdef = METRICS[mname]
-                dash = ["solid", "dash", "dot", "dashdot"][m_idx % 4]
+                is_mean = mdef.expr is not None and has_mean(mdef.expr)
+                dash = "dash" if is_mean else ["solid", "dash", "dot", "dashdot"][m_idx % 4]
+                width = 4 if is_mean else 2
                 for s_idx, (label, buckets) in enumerate(metric_results[mname]):
                     xs = [bk for bk in sorted_buckets if bk in buckets]
                     ys = [buckets[bk] for bk in xs]
-                    color = COLORS[s_idx % len(COLORS)]
+                    color = "black" if is_mean else COLORS[s_idx % len(COLORS)]
                     trace_name = f"{label} — {mdef.label}" if len(group) > 1 else label
                     fig.add_trace(
                         go.Scatter(
                             x=xs, y=ys, name=trace_name,
                             mode="lines+markers",
-                            line=dict(color=color, dash=dash),
+                            line=dict(color=color, dash=dash, width=width),
                             marker=dict(color=color),
                             text=[mdef.fmt(y) for y in ys],
                             hovertemplate="%{x}<br>%{text}<extra>" + trace_name + "</extra>",
@@ -779,7 +788,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             for label, buckets in results:
                 if not buckets:
                     continue
-                print(f"\n  {label or mname}  by {period_label}")
+                print(f"\n  {label or display_name}  by {period_label}")
                 col_w = max(len(mdef.label), 14)
                 print(f"  {'period':<12}  {mdef.label:>{col_w}}")
                 for bk in sorted(buckets):
@@ -1022,15 +1031,15 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             squeeze=False,
         )
         axes_arr = [row[0] for row in axes_arr]
+        from pa.dsl import has_mean
         for ax, group in zip(axes_arr, axes_groups):
             label_parts = []
             for m_idx, mname in enumerate(group):
                 mdef = METRICS[mname]
-                # Vary linestyle per metric in the group so overlapping
-                # series-by-color stay distinguishable
                 ls_per_metric = ["-", "--", ":", "-."][m_idx % 4]
                 _draw_trend_ax(ax, metric_results[mname], sorted_buckets, mdef,
-                               colors, linestyles=[ls_per_metric] * len(metric_results[mname]))
+                               colors, linestyles=[ls_per_metric] * len(metric_results[mname]),
+                               is_mean=mdef.expr is not None and has_mean(mdef.expr))
                 label_parts.append(mdef.label)
                 if mdef.log_scale:
                     ax.set_yscale("log")
