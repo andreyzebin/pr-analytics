@@ -530,6 +530,37 @@ def _has_source(e) -> bool:
     return False
 
 
+def find_outer_ratio(e):
+    """Walk wrappers (Period, DateRange, FromSource, Group, Split) to find
+    a Ratio at the data-level. Returns (num_expr, den_expr) or None.
+    Stops at Mean (group-collapsing) — for averaged ratios the per-bucket
+    numerator/denominator pair is no longer meaningful."""
+    cur = e
+    while True:
+        r = _is_ratio(cur)
+        if r is not None:
+            return r  # (num, den)
+        if isinstance(cur, Mean):
+            return None
+        if isinstance(cur, (Period, DateRange, FromSource, Group, Split)):
+            cur = cur.inner
+            continue
+        return None
+
+
+def replace_ratio(e, replacement):
+    """Return a copy of `e` with its outermost Ratio replaced by `replacement`.
+    Preserves all wrappers (Period/Range/Group/Split/@source). Returns `e`
+    unchanged if no Ratio is reachable. Does not descend into Mean — the
+    sister of `find_outer_ratio`."""
+    from dataclasses import replace as _dc_replace
+    if _is_ratio(e) is not None:
+        return replacement
+    if isinstance(e, (Period, DateRange, FromSource, Group, Split)):
+        return _dc_replace(e, inner=replace_ratio(e.inner, replacement))
+    return e
+
+
 def has_mean(e) -> bool:
     """True if the expression collapses groups via Mean — used by the renderer
     to draw such series with a bold dashed style ("baseline overlay")."""

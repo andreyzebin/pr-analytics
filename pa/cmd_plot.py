@@ -19,6 +19,13 @@ from pa.utils import collect_repos_from_args, date_to_ms, ms_to_date
 log = logging.getLogger(__name__)
 
 
+def _fmt_num(v) -> str:
+    """Compact int-or-float formatting for ratio component tooltips."""
+    if v is None:
+        return "?"
+    return f"{int(v)}" if v == int(v) else f"{v:.1f}"
+
+
 def _build_dsl_vars(args, cfg, *, conn=None, pr_rows=None,
                     since_ts=None, until_ts=None, repo_ids=None) -> dict:
     """Single source of truth for the variable dict passed to Expr.eval().
@@ -245,6 +252,7 @@ def _save_trend_html(
     period_label: str,
     state: str,
     axes_groups: list[list[str]] | None = None,
+    ratio_components: dict[str, dict[str, dict[str, tuple]]] | None = None,
 ) -> bool:
     """Render trend chart as interactive HTML via plotly. Returns True on success."""
     try:
@@ -280,23 +288,39 @@ def _save_trend_html(
                 is_mean = mdef.expr is not None and has_mean(mdef.expr)
                 dash = "dash" if is_mean else ["solid", "dash", "dot", "dashdot"][m_idx % 4]
                 width = 4 if is_mean else 2
+                comps_for_metric = (ratio_components or {}).get(mname, {})
                 for s_idx, (label, buckets) in enumerate(metric_results[mname]):
                     xs = [bk for bk in sorted_buckets if bk in buckets]
                     ys = [buckets[bk] for bk in xs]
                     color = "black" if is_mean else COLORS[s_idx % len(COLORS)]
                     trace_name = f"{label} — {mdef.label}" if len(group) > 1 else label
-                    # Group by (label, metric) so the same series across subplots
-                    # toggles together and shows only one legend entry.
                     lg = f"{mname}::{label}"
                     show_legend = lg not in legend_seen
                     legend_seen.add(lg)
+
+                    # Ratio metrics get (num, den) per bucket as customdata,
+                    # surfaced in the hover tooltip as e.g. "42% (10 / 24)".
+                    series_comps = comps_for_metric.get(label, {})
+                    if series_comps:
+                        custom = [list(series_comps.get(bk, (None, None))) for bk in xs]
+                        text = [
+                            (f"{mdef.fmt(y)}  ({_fmt_num(c[0])} / {_fmt_num(c[1])})"
+                             if c[0] is not None and c[1] is not None
+                             else mdef.fmt(y))
+                            for y, c in zip(ys, custom)
+                        ]
+                    else:
+                        custom = None
+                        text = [mdef.fmt(y) for y in ys]
+
                     fig.add_trace(
                         go.Scatter(
                             x=xs, y=ys, name=trace_name,
                             mode="lines+markers",
                             line=dict(color=color, dash=dash, width=width),
                             marker=dict(color=color),
-                            text=[mdef.fmt(y) for y in ys],
+                            text=text,
+                            customdata=custom,
                             hovertemplate="%{x}<br>%{text}<extra>" + trace_name + "</extra>",
                             legendgroup=lg,
                             showlegend=show_legend,
@@ -783,6 +807,24 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 )
             results = wrapped.eval_series(all_rows, period, dsl_vars)
 
+            # Parallel num/den eval for ratio metrics (skipped for Mean).
+            from pa.dsl import find_outer_ratio, replace_ratio
+            ratio_pair = find_outer_ratio(wrapped)
+            comps_for_metric: dict[str, dict] = {}
+            if ratio_pair is not None:
+                num_e, den_e = ratio_pair
+                num_r = dict(replace_ratio(wrapped, num_e).eval_series(
+                    all_rows, period, dsl_vars))
+                den_r = dict(replace_ratio(wrapped, den_e).eval_series(
+                    all_rows, period, dsl_vars))
+                for label, _ in results:
+                    nb, db = num_r.get(label, {}), den_r.get(label, {})
+                    comps_for_metric[label] = {
+                        bk: (nb.get(bk, 0.0 if bk in db else None),
+                             db.get(bk, 0.0 if bk in nb else None))
+                        for bk in set(nb) | set(db)
+                    }
+
             print(f"\n{'─' * 60}")
             display_name = (mdef.label
                             if mname.startswith(("_ad_hoc_", "_full_dsl_"))
@@ -798,9 +840,18 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                     continue
                 print(f"\n  {label or display_name}  by {period_label}")
                 col_w = max(len(mdef.label), 14)
-                print(f"  {'period':<12}  {mdef.label:>{col_w}}")
-                for bk in sorted(buckets):
-                    print(f"  {bk:<12}  {mdef.fmt(buckets[bk]):>{col_w}}")
+                comps = comps_for_metric.get(label, {})
+                if comps:
+                    print(f"  {'period':<12}  {mdef.label:>{col_w}}   {'(num/den)':>14}")
+                    for bk in sorted(buckets):
+                        v = mdef.fmt(buckets[bk])
+                        n, d = comps.get(bk, (None, None))
+                        cs = f"({_fmt_num(n)}/{_fmt_num(d)})"
+                        print(f"  {bk:<12}  {v:>{col_w}}   {cs:>14}")
+                else:
+                    print(f"  {'period':<12}  {mdef.label:>{col_w}}")
+                    for bk in sorted(buckets):
+                        print(f"  {bk:<12}  {mdef.fmt(buckets[bk]):>{col_w}}")
 
             # Per-PR drill-down for Median/Sum-of-RowExpr metrics
             row_agg = _row_aggregator(mdef.expr)
@@ -905,6 +956,15 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         since_ts=since_ts, until_ts=until_ts, repo_ids=all_repo_ids,
     )
 
+    # ratio_components[metric_name][series_label][bucket] = (num, den)
+    # Populated only for metrics whose expression has a Ratio reachable through
+    # Period/Range/Source/Group/Split (NOT through Mean). Drives:
+    #   - hover tooltips in plotly (`42% (10 / 24)`)
+    #   - JSON output (extra `components` field per bucket)
+    #   - --type points text rendering (appends `(num/den)` to value)
+    from pa.dsl import find_outer_ratio, replace_ratio
+    ratio_components: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+
     for metric_name in requested_metrics:
         mdef = METRICS[metric_name]
         if mdef.expr is None:
@@ -922,6 +982,29 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         # Source metrics ignore input rows; non-source need all_rows for
         # Group/Split partitioning.
         results = wrapped.eval_series(all_rows, period, dsl_vars)
+
+        # Parallel num/den eval for Ratio metrics — runs the same wrapped tree
+        # twice with Ratio replaced by num and by den. ~2× cost, all in memory.
+        ratio_pair = find_outer_ratio(wrapped)
+        if ratio_pair is not None:
+            num_expr, den_expr = ratio_pair
+            num_results = dict(replace_ratio(wrapped, num_expr).eval_series(
+                all_rows, period, dsl_vars))
+            den_results = dict(replace_ratio(wrapped, den_expr).eval_series(
+                all_rows, period, dsl_vars))
+            comps: dict[str, dict[str, tuple[float, float]]] = {}
+            for label, _ in results:
+                nb = num_results.get(label, {})
+                db = den_results.get(label, {})
+                # Count-based aggregators omit zero-count buckets entirely.
+                # When the denominator has the bucket but the numerator doesn't,
+                # the numerator is logically 0 (zero matching rows), not "unknown".
+                comps[label] = {
+                    bk: (nb.get(bk, 0.0 if bk in db else None),
+                         db.get(bk, 0.0 if bk in nb else None))
+                    for bk in set(nb) | set(db)
+                }
+            ratio_components[metric_name] = comps
 
         # Decorate empty / source labels with author/judge for readability.
         # `--split total[:label]` produces a single series named after the label.
@@ -987,7 +1070,17 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                     "unit": METRICS[mname].unit,
                     "plot_kind": METRICS[mname].plot_kind,
                     "series": [
-                        {"label": label, "buckets": {bk: buckets[bk] for bk in sorted(buckets.keys())}}
+                        {
+                            "label": label,
+                            "buckets": {bk: buckets[bk] for bk in sorted(buckets.keys())},
+                            **({
+                                "components": {
+                                    bk: {"num": n, "den": d}
+                                    for bk, (n, d) in
+                                    sorted(ratio_components.get(mname, {}).get(label, {}).items())
+                                }
+                            } if mname in ratio_components else {}),
+                        }
                         for label, buckets in metric_results.get(mname, [])
                     ],
                 }
@@ -1167,7 +1260,8 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     if out_path.suffix.lower() == ".html":
         ok = _save_trend_html(out_path, metric_results, sorted_buckets,
                               requested_metrics, layout, period_label, state,
-                              axes_groups=axes_groups)
+                              axes_groups=axes_groups,
+                              ratio_components=ratio_components)
         if ok:
             plt.close(fig)
             print(f"Chart saved to {out_path}", flush=True)
