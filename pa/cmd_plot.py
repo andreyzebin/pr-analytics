@@ -336,7 +336,7 @@ def _save_trend_html(
                 row=row_idx, col=1,
             )
         fig.update_layout(
-            title=f"by {period_label} ({state})",
+            title=f"by {period_label}",
             height=max(400, 250 * n_rows + 100),
             hovermode="x unified",
         )
@@ -419,7 +419,7 @@ def _save_trend_html(
 
     title = " + ".join(METRICS[m].label for m in requested_metrics)
     fig.update_layout(
-        title=f"{title} by {period_label} ({state})",
+        title=f"{title} by {period_label}",
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
