@@ -372,19 +372,24 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
   --type points
 
 # Несколько метрик на разных subplot'ах через --axes (одна группа = одна subplot)
-# Adoption / feedback-acceptance / merge-acceptance по проектам, по неделям:
+# Воронка по проектам, по неделям:
+#   adoption       — на скольких PR агент оставил коммент
+#   any_feedback   — на сколько комментов агент получил любую реакцию/ответ
+#   feedback_acc   — % "yes" из тех, на которые отреагировали (LLM-судья)
+#   merge_acc      — % реально учтённых в коде по diff'у
 .venv/bin/python pr_analytics.py plot \
   --since 2026-01-01 --state MERGED \
   --type trend --period week \
   --author ai-review-bot --judge-model deepseek-chat \
   --split reviewer:ai-review-bot \
-  --metrics adoption_rate,feedback_acceptance_rate,merge_acceptance_rate \
+  --metrics adoption_rate,feedback_rate,feedback_acceptance_rate,merge_acceptance_rate \
   --group-by project \
   --projects PROJ1,PROJ2,PROJ3,PROJ4 \
   --axes "adoption_rate" \
+  --axes "feedback_rate" \
   --axes "feedback_acceptance_rate" \
   --axes "merge_acceptance_rate" \
-  --output output/triple.html
+  --output output/funnel.html
 
 # То же самое в чистой DSL-форме (вывод --new-dsl).
 # `$bot` — кастомная переменная (не привязана к --author/--split), задаётся
@@ -397,6 +402,7 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
   --type 'trend' --output 'output/triple.html' \
   --projects 'PROJ1,PROJ2,PROJ3,PROJ4' \
   --axes 'adoption_rate' \
+  --axes 'any_feedback_rate' \
   --axes 'feedback_acceptance_rate' \
   --axes 'merge_acceptance_rate' \
   --var 'state=MERGED' \
@@ -409,6 +415,14 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
         ratio(
           count((state=$state and ($bot in reviewers or $bot in commenters)), @created_date),
           count(state=$state, @created_date),
+        ),
+      ))))' \
+  --dsl 'any_feedback_rate=
+    period(week, range(since=2026-01-01,
+      @comments(group(project_key,
+        ratio(
+          count((author=$bot and parent_id=null and (has_reaction=1 or has_reply=1)), @created_date),
+          count((author=$bot and parent_id=null), @created_date),
         ),
       ))))' \
   --dsl 'feedback_acceptance_rate=
