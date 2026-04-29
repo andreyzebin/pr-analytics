@@ -14,6 +14,7 @@ from pa.config import resolve_db, resolve_judge_model
 from pa.db import open_db
 from pa.dsl import BinOp, FromSource, Group, Split, auto_wrap
 from pa.metrics import METRICS, MetricDef, bucket_key, fmt_hours
+from pa.buckets import bucket_display
 from pa.utils import collect_repos_from_args, date_to_ms, ms_to_date
 
 log = logging.getLogger(__name__)
@@ -342,7 +343,12 @@ def _save_trend_html(
         # Pin X-axis category order to chronological sorted_buckets (otherwise
         # plotly uses first-seen order across traces, which produces zigzags
         # when later series have earlier dates than earlier series).
-        fig.update_xaxes(categoryorder="array", categoryarray=sorted_buckets)
+        fig.update_xaxes(
+        categoryorder="array", categoryarray=sorted_buckets,
+        tickmode="array",
+        tickvals=sorted_buckets,
+        ticktext=[bucket_display(b) for b in sorted_buckets],
+    )
         fig.write_html(str(out_path))
         return True
 
@@ -418,7 +424,12 @@ def _save_trend_html(
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     # Force correct x-axis order — plotly otherwise sorts categories by first appearance
-    fig.update_xaxes(categoryorder="array", categoryarray=sorted_buckets)
+    fig.update_xaxes(
+        categoryorder="array", categoryarray=sorted_buckets,
+        tickmode="array",
+        tickvals=sorted_buckets,
+        ticktext=[bucket_display(b) for b in sorted_buckets],
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(out_path))
     return True
@@ -842,16 +853,16 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 col_w = max(len(mdef.label), 14)
                 comps = comps_for_metric.get(label, {})
                 if comps:
-                    print(f"  {'period':<12}  {mdef.label:>{col_w}}   {'(num/den)':>14}")
+                    print(f"  {'period':<12}  {'date':<8}  {mdef.label:>{col_w}}   {'(num/den)':>14}")
                     for bk in sorted(buckets):
                         v = mdef.fmt(buckets[bk])
                         n, d = comps.get(bk, (None, None))
                         cs = f"({_fmt_num(n)}/{_fmt_num(d)})"
-                        print(f"  {bk:<12}  {v:>{col_w}}   {cs:>14}")
+                        print(f"  {bk:<12}  {bucket_display(bk):<8}  {v:>{col_w}}   {cs:>14}")
                 else:
-                    print(f"  {'period':<12}  {mdef.label:>{col_w}}")
+                    print(f"  {'period':<12}  {'date':<8}  {mdef.label:>{col_w}}")
                     for bk in sorted(buckets):
-                        print(f"  {bk:<12}  {mdef.fmt(buckets[bk]):>{col_w}}")
+                        print(f"  {bk:<12}  {bucket_display(bk):<8}  {mdef.fmt(buckets[bk]):>{col_w}}")
 
             # Per-PR drill-down for Median/Sum-of-RowExpr metrics
             row_agg = _row_aggregator(mdef.expr)
@@ -1170,7 +1181,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             ax.set_title(" + ".join(label_parts))
             ax.legend(fontsize=8)
         axes_arr[-1].set_xticks(range(len(sorted_buckets)))
-        axes_arr[-1].set_xticklabels(sorted_buckets, rotation=45, ha="right")
+        axes_arr[-1].set_xticklabels([bucket_display(b) for b in sorted_buckets], rotation=45, ha="right")
         plt.tight_layout()
 
     elif n_metrics == 1:
@@ -1180,7 +1191,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         mdef = METRICS[mname]
         _draw_trend_ax(ax, metric_results[mname], sorted_buckets, mdef, colors)
         ax.set_xticks(range(len(sorted_buckets)))
-        ax.set_xticklabels(sorted_buckets, rotation=45, ha="right")
+        ax.set_xticklabels([bucket_display(b) for b in sorted_buckets], rotation=45, ha="right")
         ax.set_title(f"{mdef.label} by {period_label} ({state})")
         ax.legend(fontsize=8)
         plt.tight_layout()
@@ -1202,7 +1213,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                        colors, linestyles=["--"] * len(series_list))
 
         ax1.set_xticks(range(len(sorted_buckets)))
-        ax1.set_xticklabels(sorted_buckets, rotation=45, ha="right")
+        ax1.set_xticklabels([bucket_display(b) for b in sorted_buckets], rotation=45, ha="right")
         ax1.set_title(f"{mdef0.label} & {mdef1.label} by {period_label} ({state})")
 
         # Combined legend: series (by color) + metric style guide
@@ -1232,7 +1243,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             ax.legend(fontsize=8)
 
         axes[-1].set_xticks(range(len(sorted_buckets)))
-        axes[-1].set_xticklabels(sorted_buckets, rotation=45, ha="right")
+        axes[-1].set_xticklabels([bucket_display(b) for b in sorted_buckets], rotation=45, ha="right")
         title = " + ".join(METRICS[m].label for m in requested_metrics)
         axes[0].set_title(f"{title} by {period_label} ({state})")
         plt.tight_layout()
