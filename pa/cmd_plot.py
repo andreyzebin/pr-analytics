@@ -315,6 +315,15 @@ def _save_trend_html(
                         custom = None
                         text = [mdef.fmt(y) for y in ys]
 
+                    # DSL formula appended to extra-info side of hover tooltip
+                    # (kept on legend hover too via hoverlabel.namelength)
+                    formula_html = ""
+                    if metric_dsl_text and metric_dsl_text.get(mname):
+                        ft = metric_dsl_text[mname]
+                        ft = ft.replace("<", "&lt;").replace(">", "&gt;")
+                        ft = ft.replace("\n", "<br>")
+                        formula_html = f"<br><span style='font-family:monospace;font-size:9px;color:#888'>{ft}</span>"
+
                     fig.add_trace(
                         go.Scatter(
                             x=xs, y=ys, name=trace_name,
@@ -323,7 +332,8 @@ def _save_trend_html(
                             marker=dict(color=color),
                             text=text,
                             customdata=custom,
-                            hovertemplate="%{x}<br>%{text}<extra>" + trace_name + "</extra>",
+                            hovertemplate=("%{x}<br>%{text}"
+                                           "<extra>" + trace_name + formula_html + "</extra>"),
                             legendgroup=lg,
                             showlegend=show_legend,
                         ),
@@ -336,40 +346,10 @@ def _save_trend_html(
                 type="log" if first_mdef.log_scale else "-",
                 row=row_idx, col=1,
             )
-        # Right-margin DSL formula annotations — one per subplot, showing the
-        # exact rendered formulas with $vars baked into literal values.
-        if metric_dsl_text:
-            for row_idx, group in enumerate(axes_groups, 1):
-                parts = []
-                for mname in group:
-                    txt = metric_dsl_text.get(mname)
-                    if not txt:
-                        continue
-                    label = METRICS[mname].label
-                    safe_txt = txt.replace("<", "&lt;").replace(">", "&gt;")
-                    safe_txt = safe_txt.replace("\n", "<br>")
-                    parts.append(f"<b>{label}</b><br>{safe_txt}")
-                if not parts:
-                    continue
-                xref = f"x{row_idx} domain" if row_idx > 1 else "x domain"
-                yref = f"y{row_idx} domain" if row_idx > 1 else "y domain"
-                fig.add_annotation(
-                    xref=xref, yref=yref,
-                    x=1.02, y=1.0, xanchor="left", yanchor="top",
-                    text="<br><br>".join(parts),
-                    showarrow=False,
-                    align="left",
-                    font=dict(family="monospace", size=9, color="#555"),
-                    bgcolor="rgba(255,255,255,0.85)",
-                    bordercolor="#ddd", borderwidth=1, borderpad=6,
-                )
-
         fig.update_layout(
             title=f"by {period_label}",
             height=max(400, 250 * n_rows + 100),
-            hovermode="x unified",
-            # Reserve space on the right for the formula annotations
-            margin=dict(r=420 if metric_dsl_text else 80),
+            hovermode="closest",  # per-trace hover shows that trace's formula
         )
         # Pin X-axis category order to chronological sorted_buckets (otherwise
         # plotly uses first-seen order across traces, which produces zigzags
