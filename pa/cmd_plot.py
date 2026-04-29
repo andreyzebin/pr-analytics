@@ -997,7 +997,30 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         return
 
     n_metrics = len(requested_metrics)
-    period_label = "Week" if period == "week" else "Month"
+    # Effective period for chart titles: if the metrics' DSL contains a top-
+    # level Period() node, that wins over the CLI --period default. Picks the
+    # first metric's period; if metrics use mixed periods, falls back to
+    # "mixed" so the title doesn't lie.
+    from pa.dsl import Period as _Period
+    def _expr_period(expr):
+        cur = expr
+        while cur is not None:
+            if isinstance(cur, _Period):
+                return cur.period
+            cur = getattr(cur, "inner", None)
+        return None
+    metric_periods = {
+        _expr_period(METRICS[m].expr) for m in requested_metrics
+        if METRICS[m].expr is not None
+    } - {None}
+    if len(metric_periods) == 1:
+        eff_period = next(iter(metric_periods))
+    elif len(metric_periods) > 1:
+        eff_period = "mixed"
+    else:
+        eff_period = period
+    period_label = {"week": "Week", "month": "Month", "mixed": "mixed period"}.get(
+        eff_period, eff_period.capitalize() if eff_period else "Month")
     w = max(10, len(sorted_buckets) * 0.8)
 
     # ── Explicit subplot grouping via --axes ──────────────────────────────
