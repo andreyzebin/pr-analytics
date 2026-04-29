@@ -391,6 +391,8 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 # одним --var и используется во всех местах. Дата — литерал в range().
 # merge_acceptance_rate без split — split(reviewer:$bot) бесполезен,
 # когда агент пишет комменты но не в формальных ревьюерах PR.
+# Все три метрики бакетятся по @created_date — одни и те же PR попадают
+# в одни и те же недели, метрики сравниваются колонка-в-колонку.
 .venv/bin/python pr_analytics.py plot \
   --type 'trend' --output 'output/triple.html' \
   --projects 'PROJ1,PROJ2,PROJ3,PROJ4' \
@@ -413,17 +415,17 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
     period(week, range(since=2026-01-01,
       @analysis(group(project_key,
         ratio(
-          count((verdict="yes" and author=$bot)),
-          count((verdict in ["yes","no"] and author=$bot)),
+          count((verdict="yes" and author=$bot), @created_date),
+          count((verdict in ["yes","no"] and author=$bot), @created_date),
         ),
       ))))' \
   --dsl 'merge_acceptance_rate=
     period(week, range(since=2026-01-01,
       @merge(group(project_key,
         ratio(
-          (count((verdict="YES" and author=$bot))
-           + (0.5 * count((verdict="PARTIAL" and author=$bot)))),
-          count((verdict in ["YES","PARTIAL","NO"] and author=$bot)),
+          (count((verdict="YES" and author=$bot), @created_date)
+           + (0.5 * count((verdict="PARTIAL" and author=$bot), @created_date))),
+          count((verdict in ["YES","PARTIAL","NO"] and author=$bot), @created_date),
         ),
       ))))'
 ```
