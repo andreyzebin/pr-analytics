@@ -254,6 +254,7 @@ def _save_trend_html(
     state: str,
     axes_groups: list[list[str]] | None = None,
     ratio_components: dict[str, dict[str, dict[str, tuple]]] | None = None,
+    metric_dsl_text: dict[str, str] | None = None,
 ) -> bool:
     """Render trend chart as interactive HTML via plotly. Returns True on success."""
     try:
@@ -335,10 +336,40 @@ def _save_trend_html(
                 type="log" if first_mdef.log_scale else "-",
                 row=row_idx, col=1,
             )
+        # Right-margin DSL formula annotations — one per subplot, showing the
+        # exact rendered formulas with $vars baked into literal values.
+        if metric_dsl_text:
+            for row_idx, group in enumerate(axes_groups, 1):
+                parts = []
+                for mname in group:
+                    txt = metric_dsl_text.get(mname)
+                    if not txt:
+                        continue
+                    label = METRICS[mname].label
+                    safe_txt = txt.replace("<", "&lt;").replace(">", "&gt;")
+                    safe_txt = safe_txt.replace("\n", "<br>")
+                    parts.append(f"<b>{label}</b><br>{safe_txt}")
+                if not parts:
+                    continue
+                xref = f"x{row_idx} domain" if row_idx > 1 else "x domain"
+                yref = f"y{row_idx} domain" if row_idx > 1 else "y domain"
+                fig.add_annotation(
+                    xref=xref, yref=yref,
+                    x=1.02, y=1.0, xanchor="left", yanchor="top",
+                    text="<br><br>".join(parts),
+                    showarrow=False,
+                    align="left",
+                    font=dict(family="monospace", size=9, color="#555"),
+                    bgcolor="rgba(255,255,255,0.85)",
+                    bordercolor="#ddd", borderwidth=1, borderpad=6,
+                )
+
         fig.update_layout(
             title=f"by {period_label}",
             height=max(400, 250 * n_rows + 100),
             hovermode="x unified",
+            # Reserve space on the right for the formula annotations
+            margin=dict(r=420 if metric_dsl_text else 80),
         )
         # Pin X-axis category order to chronological sorted_buckets (otherwise
         # plotly uses first-seen order across traces, which produces zigzags
@@ -973,8 +1004,12 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     #   - hover tooltips in plotly (`42% (10 / 24)`)
     #   - JSON output (extra `components` field per bucket)
     #   - --type points text rendering (appends `(num/den)` to value)
-    from pa.dsl import find_outer_ratio, replace_ratio
+    from pa.dsl import find_outer_ratio, replace_ratio, format_expr, substitute_vars
     ratio_components: dict[str, dict[str, dict[str, tuple[float, float]]]] = {}
+    # Per-metric formatted DSL (with $vars resolved to literals) — surfaced
+    # in the HTML chart as right-margin annotations so the reader can see
+    # the exact formula being rendered.
+    metric_dsl_text: dict[str, str] = {}
 
     for metric_name in requested_metrics:
         mdef = METRICS[metric_name]
@@ -990,6 +1025,12 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 since=getattr(args, "since", None), until=getattr(args, "until", None),
                 skip_split=mdef.bypass_split,
             )
+
+        # Bake user-visible vars into the displayed DSL so the formula is
+        # self-explanatory — no $-references the reader has to mentally resolve.
+        bake = {k: v for k, v in dsl_vars.items()
+                if not k.startswith("_") and v is not None}
+        metric_dsl_text[metric_name] = format_expr(substitute_vars(wrapped, bake))
         # Source metrics ignore input rows; non-source need all_rows for
         # Group/Split partitioning.
         results = wrapped.eval_series(all_rows, period, dsl_vars)
@@ -1272,7 +1313,8 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         ok = _save_trend_html(out_path, metric_results, sorted_buckets,
                               requested_metrics, layout, period_label, state,
                               axes_groups=axes_groups,
-                              ratio_components=ratio_components)
+                              ratio_components=ratio_components,
+                              metric_dsl_text=metric_dsl_text)
         if ok:
             plt.close(fig)
             print(f"Chart saved to {out_path}", flush=True)

@@ -281,11 +281,14 @@ class Parser:
         self._eat_close()
         return DateRange(since, until, inner)
 
-    def _date_value(self) -> str:
-        """Parse a YYYY-MM-DD date — either as a string literal or as bare digits."""
+    def _date_value(self):
+        """Parse a YYYY-MM-DD date — string literal, bare digits, or $var.
+        Returns str (literal) or Var (resolved at eval time from --var name=value)."""
         t = self.peek()
         if t.kind == "STRING":
             return self.eat().value
+        if t.kind == "VAR":
+            return Var(self.eat().value)
         # bare YYYY-MM-DD: NUMBER '-' NUMBER '-' NUMBER
         y = self.expect("NUMBER").value
         self.expect("OP", "-")

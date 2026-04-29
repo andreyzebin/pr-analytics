@@ -398,8 +398,11 @@ class DateRange(Expr):
 
     def _ctx(self, vars):
         from pa.utils import date_to_ms
-        s = date_to_ms(self.since) if self.since else None
-        u = date_to_ms(self.until, end_of_day=True) if self.until else None
+        # since/until may be a Var(name) — resolve from --var entries at eval time
+        s_val = _resolve(self.since, vars) if self.since is not None else None
+        u_val = _resolve(self.until, vars) if self.until is not None else None
+        s = date_to_ms(s_val) if s_val else None
+        u = date_to_ms(u_val, end_of_day=True) if u_val else None
         new_vars = dict(vars)
         if s is not None: new_vars["_since_ts"] = s
         if u is not None: new_vars["_until_ts"] = u
@@ -771,8 +774,8 @@ def _fmt_inline(e) -> str:
 
     if isinstance(e, DateRange):
         bits = []
-        if e.since: bits.append(f"since={e.since}")
-        if e.until: bits.append(f"until={e.until}")
+        if e.since: bits.append(f"since={_fmt_val(e.since)}")
+        if e.until: bits.append(f"until={_fmt_val(e.until)}")
         return f"range({', '.join(bits)}, {_fmt_inline(e.inner)})"
 
     if isinstance(e, (Count, CountDistinct, Sum, Median)):
@@ -849,8 +852,8 @@ def format_expr(e, indent: int = 0) -> str:
 
     if isinstance(e, DateRange):
         bits = []
-        if e.since: bits.append(f"since={e.since}")
-        if e.until: bits.append(f"until={e.until}")
+        if e.since: bits.append(f"since={_fmt_val(e.since)}")
+        if e.until: bits.append(f"until={_fmt_val(e.until)}")
         return (f"{pad}range({', '.join(bits)},\n"
                 f"{format_expr(e.inner, indent + 1)},\n"
                 f"{pad})")
