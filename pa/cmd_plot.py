@@ -853,16 +853,16 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                 col_w = max(len(mdef.label), 14)
                 comps = comps_for_metric.get(label, {})
                 if comps:
-                    print(f"  {'period':<12}  {'date':<8}  {mdef.label:>{col_w}}   {'(num/den)':>14}")
+                    print(f"  {'period':<12}  {'date':<14}  {mdef.label:>{col_w}}   {'(num/den)':>14}")
                     for bk in sorted(buckets):
                         v = mdef.fmt(buckets[bk])
                         n, d = comps.get(bk, (None, None))
                         cs = f"({_fmt_num(n)}/{_fmt_num(d)})"
-                        print(f"  {bk:<12}  {bucket_display(bk):<8}  {v:>{col_w}}   {cs:>14}")
+                        print(f"  {bk:<12}  {bucket_display(bk):<14}  {v:>{col_w}}   {cs:>14}")
                 else:
-                    print(f"  {'period':<12}  {'date':<8}  {mdef.label:>{col_w}}")
+                    print(f"  {'period':<12}  {'date':<14}  {mdef.label:>{col_w}}")
                     for bk in sorted(buckets):
-                        print(f"  {bk:<12}  {bucket_display(bk):<8}  {mdef.fmt(buckets[bk]):>{col_w}}")
+                        print(f"  {bk:<12}  {bucket_display(bk):<14}  {mdef.fmt(buckets[bk]):>{col_w}}")
 
             # Per-PR drill-down for Median/Sum-of-RowExpr metrics
             row_agg = _row_aggregator(mdef.expr)
