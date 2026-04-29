@@ -413,8 +413,8 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
     period(week, range(since=2026-01-01,
       @pr(group(project_key,
         ratio(
-          count((state=$state and ($bot in reviewers or $bot in commenters)), @created_date),
-          count(state=$state, @created_date),
+          count((state in ["MERGED","DECLINED"] and ($bot in reviewers or $bot in commenters)), @created_date),
+          count(state in ["MERGED","DECLINED"], @created_date),
         ),
       ))))' \
   --dsl 'any_feedback_rate=
