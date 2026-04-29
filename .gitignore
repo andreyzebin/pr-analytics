@@ -1,6 +1,8 @@
 .venv/
 .env
 config.local.yaml
+*.local.md
+*.local.txt
 output/
 *.csv
 *.html
