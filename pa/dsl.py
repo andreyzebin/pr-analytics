@@ -246,9 +246,7 @@ class BinOp(Expr):
     left: Expr
     right: Expr
 
-    def eval(self, rows, period, vars):
-        L = self.left.eval(rows, period, vars)
-        R = self.right.eval(rows, period, vars)
+    def _combine_buckets(self, L: dict, R: dict) -> dict:
         l_const = "__const__" in L
         r_const = "__const__" in R
         if l_const and r_const:
@@ -283,6 +281,42 @@ class BinOp(Expr):
                 out[bk] = _apply_op(self.op, lv, rv)
             except ZeroDivisionError:
                 continue  # skip undefined buckets in division
+        return out
+
+    def eval(self, rows, period, vars):
+        return self._combine_buckets(
+            self.left.eval(rows, period, vars),
+            self.right.eval(rows, period, vars),
+        )
+
+    def eval_series(self, rows, period, vars):
+        """Combine multi-series sides label-by-label.
+
+        Cross-source ratio like `ratio(@merge(group(p, ...)), @comments(group(p, ...)))`
+        produces a multi-series numerator and denominator with matching project
+        labels — pair them up. If one side is single-series with empty label
+        ("") it broadcasts across all labels of the other side.
+        """
+        L = self.left.eval_series(rows, period, vars)
+        R = self.right.eval_series(rows, period, vars)
+
+        single_L = len(L) == 1 and L[0][0] == ""
+        single_R = len(R) == 1 and R[0][0] == ""
+        if single_L and single_R:
+            return [("", self._combine_buckets(L[0][1], R[0][1]))]
+
+        l_map = dict(L)
+        r_map = dict(R)
+        labels = sorted(set(l_map) | set(r_map))
+        out: list[tuple[str, dict]] = []
+        for label in labels:
+            if label == "" and (single_L or single_R):
+                continue  # placeholder side, handled via broadcast below
+            l_buckets = l_map.get(label) if not single_L else l_map.get("")
+            r_buckets = r_map.get(label) if not single_R else r_map.get("")
+            if l_buckets is None or r_buckets is None:
+                continue
+            out.append((label, self._combine_buckets(l_buckets, r_buckets)))
         return out
 
 

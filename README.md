@@ -435,14 +435,16 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
       ))))' \
   --dsl 'merge_acceptance_rate=
     period(week, range(since=2026-01-01,
-      @merge(group(project_key,
-        ratio(
+      ratio(
+        @merge(group(project_key,
           (count((verdict="YES" and author=$bot), @created_date)
-           + (0.5 * count((verdict="PARTIAL" and author=$bot), @created_date))),
-          count((verdict in ["YES","PARTIAL","NO"] and author=$bot), @created_date),
-        ),
-      ))))'
+           + (0.5 * count((verdict="PARTIAL" and author=$bot), @created_date))))),
+        @comments(group(project_key,
+          count((author=$bot and parent_id=null and file_path is not null), @created_date))),
+      )))'
 ```
+
+**Cross-source ratio.** Когда числитель и знаменатель должны жить в РАЗНЫХ таблицах (например `merge_acceptance_rate` нужно делить на ВСЕ inline-комменты, а не только проанализированные), `ratio(@A(group(field, ...)), @B(group(field, ...)))` корректно матчит серии по одинаковым `group_field`-меткам. Иначе бы `merge_acceptance_rate` считал долю YES от **проанализированных** комментариев — а это смещённая оценка: пропущенные/skip'нутые комменты не учитываются. Со cross-source формой видна **истинная ценность замечаний агента** — сколько из всех его inline-комментов реально учтено в коде.
 
 **Контракт `--dsl`:**
 
