@@ -764,6 +764,23 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             ).fetchall()
         }
 
+    # Augment each PR row with `commenters` — set of comment authors on this PR.
+    # Enables the DSL filter `$slug in commenters` symmetrically with reviewers.
+    # Done here (BEFORE plot_type branching) so points/box/trend/json all see it.
+    if all_repo_ids:
+        placeholders = ",".join("?" * len(all_repo_ids))
+        cm_rows = conn.execute(
+            f"""SELECT repo_id, pr_id, author FROM pr_comments
+                WHERE repo_id IN ({placeholders}) AND author IS NOT NULL""",
+            all_repo_ids,
+        ).fetchall()
+        commenters_by_pr: dict[tuple, set] = {}
+        for r in cm_rows:
+            commenters_by_pr.setdefault((r["repo_id"], r["pr_id"]), set()).add(r["author"])
+        for rows_list in raw_per_repo.values():
+            for r in rows_list:
+                r["commenters"] = commenters_by_pr.get((r["repo_id"], r["pr_id"]), set())
+
     # NB: don't close conn here — DSL @-sources need it for further fetches.
     # It's closed at the end of cmd_plot via the early-return paths or fall-through.
 
@@ -946,22 +963,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
     # computed as union (unique repos across the whole range), not sum of
     # per-period unique counts.
     total_repos_sets: dict[str, dict[str, set]] = {}
-
-    # Augment each PR row with `commenters` — set of comment authors on this PR.
-    # Enables the DSL filter `$slug in commenters` symmetrically with reviewers.
-    if all_repo_ids:
-        placeholders = ",".join("?" * len(all_repo_ids))
-        cm_rows = conn.execute(
-            f"""SELECT repo_id, pr_id, author FROM pr_comments
-                WHERE repo_id IN ({placeholders}) AND author IS NOT NULL""",
-            all_repo_ids,
-        ).fetchall()
-        commenters_by_pr: dict[tuple, set] = {}
-        for r in cm_rows:
-            commenters_by_pr.setdefault((r["repo_id"], r["pr_id"]), set()).add(r["author"])
-        for rows_list in raw_per_repo.values():
-            for r in rows_list:
-                r["commenters"] = commenters_by_pr.get((r["repo_id"], r["pr_id"]), set())
+    # (commenters precompute moved earlier so points/box/json see it too)
 
     # adoption_rate validation: needs reviewer or commenter slug.
     if ("adoption_rate" in requested_metrics
