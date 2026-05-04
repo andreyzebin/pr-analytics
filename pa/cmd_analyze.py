@@ -126,6 +126,10 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
             sys.exit(4)
 
     # ── find unanalyzed comments ───────────────────────────────────────────────
+    # Terminal status only (closed_date IS NOT NULL = MERGED|DECLINED).
+    # Comments without engagement get auto-saved as verdict=no in the loop —
+    # we still pick them up here so they enter the cache and stop showing up
+    # as "skipped" forever across runs.
     q = """
         SELECT
             c.id          AS comment_id,
@@ -146,13 +150,8 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
         WHERE c.author = ?
           AND c.parent_id IS NULL
           AND pr.closed_date IS NOT NULL
-          AND (
-              EXISTS (SELECT 1 FROM comment_reactions cr WHERE cr.comment_id = c.id)
-              OR EXISTS (SELECT 1 FROM pr_comments reply
-                         WHERE reply.parent_id = c.id AND reply.author != ?)
-          )
     """
-    params: list = [author, author]
+    params: list = [author]
     if not force:
         q += """
           AND NOT EXISTS (
@@ -179,42 +178,13 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
     pending = conn.execute(q, params).fetchall()
     total = len(pending)
 
-    # Count total unanalyzed (with + without feedback) to report skipped count
-    q_total_unanalyzed = """
-        SELECT COUNT(*) FROM pr_comments c
-        JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
-        WHERE c.author = ?
-          AND c.parent_id IS NULL
-          AND pr.closed_date IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM comment_analysis ca
-              WHERE ca.comment_id = c.id AND ca.judge_model = ?
-          )
-    """
-    p_total: list = [author, judge_model]
-    if since_ts:
-        q_total_unanalyzed += " AND pr.created_date >= ?"
-        p_total.append(since_ts)
-    if until_ts:
-        q_total_unanalyzed += " AND pr.created_date <= ?"
-        p_total.append(until_ts)
-    if repo_ids:
-        q_total_unanalyzed += f" AND c.repo_id IN ({','.join('?' * len(repo_ids))})"
-        p_total.extend(repo_ids)
-    total_unanalyzed = conn.execute(q_total_unanalyzed, p_total).fetchone()[0]
-    skipped_no_feedback = total_unanalyzed - total
-
     if total == 0:
-        print(
-            f"No unanalyzed comments with feedback found for author={author!r} judge={judge_model!r}.\n"
-            f"({skipped_no_feedback} comment(s) skipped — no reactions or replies)"
-        )
+        print(f"No unanalyzed comments found for author={author!r} judge={judge_model!r}.")
         conn.close()
         return
 
     print(
-        f"Found {total} unanalyzed comment(s) with feedback for author={author!r}\n"
-        f"  ({skipped_no_feedback} skipped — no reactions or replies)\n"
+        f"Found {total} unanalyzed comment(s) on closed PRs for author={author!r}\n"
         f"Judge model: {judge_model}\n"
         f"{'DRY RUN — no API calls will be made' if dry_run else ''}"
     )
@@ -235,7 +205,7 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
     judge = build_judge(judge_model, api_key, base_url, cfg)
 
     now_ms = int(time.time() * 1000)
-    n_yes = n_no = n_unclear = n_error = 0
+    n_yes = n_no = n_unclear = n_error = n_trivial = 0
     total_tokens = 0
     start = time.monotonic()
 
@@ -262,6 +232,29 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
                 (comment_id, author),
             ).fetchall()
         ]
+
+        # Trivial: closed PR + no engagement → verdict=no, no LLM call.
+        # Saved to DB so it counts in plots and stops re-appearing in batches.
+        if not reactions and not replies:
+            conn.execute(
+                """INSERT OR REPLACE INTO comment_analysis
+                   (comment_id, judge_model, verdict, confidence, reasoning, analyzed_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (comment_id, judge_model, "no", "high",
+                 "нет реакций и ответов", now_ms),
+            )
+            conn.commit()
+            n_no += 1
+            n_trivial += 1
+            elapsed = time.monotonic() - start
+            eta = elapsed / i * (total - i)
+            print(
+                f"  [{i}/{total}]  {repo}#{row['pr_id']} comment#{comment_id}"
+                f"  → no (high) \"no engagement\" [skip LLM]"
+                f"  [{int(elapsed)}s, ~{int(eta)}s left]",
+                flush=True,
+            )
+            continue
 
         comment_text = row["comment_text"] or ""
         if max_comment_chars and len(comment_text) > max_comment_chars:
@@ -372,11 +365,11 @@ def cmd_analyze_feedback(args: argparse.Namespace, cfg: dict) -> None:
 
     elapsed = time.monotonic() - start
     tokens_summary = f"  tokens={total_tokens:,}" if total_tokens else ""
+    trivial_note = f" (incl. {n_trivial} trivial)" if n_trivial else ""
     print(
-        f"\nDone in {int(elapsed)}s.  new: yes={n_yes} no={n_no} unclear={n_unclear} error={n_error}{tokens_summary}"
+        f"\nDone in {int(elapsed)}s.  new: yes={n_yes} no={n_no}{trivial_note} "
+        f"unclear={n_unclear} error={n_error}{tokens_summary}"
         f"\n\nTotal (incl. {from_cache} from cache):  "
         f"yes={all_yes}  no={all_no}  unclear={all_unclear}  "
-        f"acceptance={all_rate}  (judge={judge_model})\n"
-        f"Note: only comments with reactions or replies were analyzed "
-        f"({skipped_no_feedback} without feedback were skipped)"
+        f"acceptance={all_rate}  (judge={judge_model})"
     )

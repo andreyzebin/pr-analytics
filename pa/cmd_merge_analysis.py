@@ -326,7 +326,7 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
         WHERE c.author = ?
           AND c.parent_id IS NULL
           AND c.file_path IS NOT NULL
-          AND pr.state = 'MERGED'
+          AND pr.state IN ('MERGED', 'DECLINED')
           AND pr.closed_date IS NOT NULL
     """
     params: list = [author]
@@ -402,6 +402,28 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
         if budget_tokens and total_tokens >= budget_tokens:
             print(f"\nToken budget reached: {total_tokens:,} / {budget_tokens:,}. Stopping.")
             break
+
+        # Fast path: DECLINED PR → suggestion never reached prod, verdict NO,
+        # no diff/commits fetch, no LLM call.
+        if row["pr_state"] == "DECLINED":
+            verdict, confidence, reasoning = "NO", 1.0, "PR declined (suggestion not merged)"
+            conn.execute(
+                """INSERT OR REPLACE INTO merge_analysis
+                   (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, analyzed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (comment_id, judge_model, analyzer_version, verdict, confidence, reasoning, now_ms),
+            )
+            conn.commit()
+            n_no += 1
+            elapsed = time.monotonic() - start
+            eta = elapsed / i * (total - i)
+            print(
+                f"  [{i}/{total}]  {repo}#{row['pr_id']} {row['file_path']}"
+                f"  → NO (1.0) \"PR declined\" [skip LLM]"
+                f"  [{int(elapsed)}s, ~{int(eta)}s left  {total_tokens:,}tok]",
+                flush=True,
+            )
+            continue
 
         # Fetch diff
         diff_result = _fetch_diff(
@@ -558,7 +580,7 @@ def cmd_merge_analysis(args: argparse.Namespace, cfg: dict) -> None:
         JOIN pull_requests pr ON pr.repo_id = c.repo_id AND pr.pr_id = c.pr_id
         WHERE c.author = ? AND ma.judge_model = ?
           AND c.parent_id IS NULL AND c.file_path IS NOT NULL
-          AND pr.state = 'MERGED' AND pr.closed_date IS NOT NULL
+          AND pr.state IN ('MERGED', 'DECLINED') AND pr.closed_date IS NOT NULL
           AND ma.analyzed_at = (
               SELECT MAX(ma2.analyzed_at) FROM merge_analysis ma2
               WHERE ma2.comment_id = ma.comment_id AND ma2.judge_model = ma.judge_model
