@@ -32,6 +32,7 @@ import sys
 
 from pa.cmd_acceptance import cmd_acceptance
 from pa.cmd_analyze import cmd_analyze_feedback
+from pa.cmd_inspect import cmd_inspect_comment, cmd_pr_timeline
 from pa.cmd_merge_analysis import cmd_merge_analysis
 from pa.cmd_select_golden import cmd_select_golden
 from pa.cmd_cache import cmd_cache
@@ -301,6 +302,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", dest="dry_run")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
+    # ── inspect-comment ─────────────────────────────────────────────────────
+    p = sub.add_parser("inspect-comment",
+                       help="Drill-down view of a single comment: text, reactions, "
+                            "replies, analysis verdicts, timing vs PR open/close")
+    p.add_argument("comment_id", type=int, help="pr_comments.id")
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
+    # ── pr-timeline ─────────────────────────────────────────────────────────
+    p = sub.add_parser("pr-timeline",
+                       help="Chronological event log for a PR (open, comments, replies, close)")
+    p.add_argument("--pr", required=True, metavar="PROJ/repo#ID",
+                   help="PR identifier, e.g. PCCFT/sql-gbd#261")
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
     # ── acceptance ──────────────────────────────────────────────────────────
     p = sub.add_parser("acceptance",
                        help="Acceptance metrics by diffgraph prompt hash")
@@ -337,6 +352,8 @@ def main() -> None:
         "status": cmd_status,
         "review-feedback": cmd_review_feedback,
         "analyze-merges": cmd_merge_analysis,
+        "inspect-comment": cmd_inspect_comment,
+        "pr-timeline": cmd_pr_timeline,
         "acceptance": cmd_acceptance,
     }
 

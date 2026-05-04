@@ -27,8 +27,11 @@ def cmd_sql(args: argparse.Namespace, cfg: dict) -> None:
     if not normalized.startswith("SELECT") and not normalized.startswith("WITH"):
         log.error("Only SELECT queries are allowed.")
         sys.exit(5)
+    # Word-boundary match so identifiers like `created_date` (contains "CREATE")
+    # or `update_at` aren't false-flagged.
+    import re
     for forbidden in ("INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "REPLACE"):
-        if forbidden in normalized:
+        if re.search(rf"\b{forbidden}\b", normalized):
             log.error("Modifying SQL operations are not allowed.")
             sys.exit(5)
 
