@@ -27,6 +27,8 @@
   - [status](#status--состояние-кэша)
   - [analyze-feedback](#analyze-feedback--llm-оценка-замечаний-ai-агента)
   - [analyze-merges](#analyze-merges--проверка-влияния-комментариев-на-код-через-diff)
+  - [inspect-comment](#inspect-comment--детали-одного-комментария)
+  - [pr-timeline](#pr-timeline--хронологическая-лента-pr)
   - [acceptance](#acceptance--метрики-по-поколению-агента-diffgraph)
   - [review-feedback](#review-feedback--обратная-связь-ai-агента)
   - [select-golden](#select-golden--отбор-эталонных-pr-для-бенчмарка)
@@ -944,6 +946,30 @@ PRIMARY KEY: `(comment_id, judge_model, analyzer_version)` — старые ре
 
 ---
 
+### `inspect-comment` — детали одного комментария
+
+Drill-down на один `comment_id`: текст, реакции, ответы, тайминги (комментарий vs PR open/close), verdict из `comment_analysis` и `merge_analysis` с reasoning. Работает офлайн — только по локальному кэшу.
+
+```bash
+.venv/bin/python pr_analytics.py inspect-comment 1144951
+```
+
+Полезно после того как `plot --type points` показал подозрительный бакет, а `sql` отдал список `comment_id` — чтобы за пару секунд увидеть полный контекст без ручного склеивания запросов.
+
+---
+
+### `pr-timeline` — хронологическая лента PR
+
+Хронологический лог событий PR: open, root-comments + replies, close. У каждого комментария рядом — verdict-метки (`[fb=no, mg=NO]`) и счётчики реакций/ответов. Cache-only.
+
+```bash
+.venv/bin/python pr_analytics.py pr-timeline --pr PCCFT/sql-gbd#261
+```
+
+Сразу видно, например: «бот ответил через 3 дня после открытия PR, а PR смержили через 6 часов после ответа» — типичный кейс, когда `merge_acceptance` падает в ноль не из-за качества reviews, а из-за тайминга.
+
+---
+
 ### `acceptance` — метрики по поколению агента (diffgraph)
 
 Показывает acceptance rate для конкретного prompt hash из diffgraph. Связь через тег `` `dg:gen:hash:run` `` в комментариях агента.
@@ -1196,6 +1222,118 @@ ORDER BY negative DESC, replies DESC
 LIMIT 20
 " --format table
 ```
+
+---
+
+### Расследование падения метрики
+
+Когда метрика на графике резко падает (или взлетает) — пошаговая методика, движущаяся от агрегата к одному комментарию.
+
+```
+plot --type points          (1) бакет с числами
+      │
+      ▼
+find-comments / sql         (2) свериться со знаменателем
+      │
+      ▼
+sql GROUP BY verdict,why    (3) разложить числитель: real-NO vs trivial-NO vs пропуск
+      │
+      ▼
+inspect-comment <id>        (4) сэмпл одной строки числителя — полный контекст
+      │
+      ▼
+pr-timeline --pr ...        (5) PR-уровень: тайминг комментария vs мерджа
+      │
+      ▼
+analyze-{merges,feedback}   (6) если пропуски — добить кэш и перезапустить
+```
+
+**Шаг 1. Воспроизвести падение в виде чисел (num/den).**
+
+`plot --type points` печатает разбивку по бакетам и проектам в STDOUT параллельно с генерацией HTML. Это первая точка опоры — увидеть _ровно_ какой числитель/знаменатель даёт нулевой/спайковый бакет.
+
+```bash
+.venv/bin/python pr_analytics.py plot --type points \
+  --output /tmp/x.html --projects PCCFT \
+  --var since=2026-04-01 --metrics '' \
+  --dsl 'merge_acceptance_rate=
+    period(biweek, range(since=$since,
+      ratio(
+        @merge(group(project_key, count((verdict="YES" and state="MERGED"), @created_date))),
+        @comments(group(project_key, count((parent_id=null and file_path is not null and state="MERGED"), @created_date))))))'
+```
+
+**Шаг 2. Свериться со знаменателем.**
+
+`find-comments` с теми же фильтрами что в DSL — даёт сырой список входящих комментариев бакета. Проверить что объём совпадает со знаменателем из шага 1 — иначе DSL-фильтр и SQL-фильтр расходятся (баг в DSL или в methodology).
+
+```bash
+.venv/bin/python pr_analytics.py find-comments \
+  --author tuz_spasibo__qodo --file-only --projects PCCFT \
+  --state MERGED --since 2026-04-20 --until 2026-05-03 --format csv
+```
+
+**Шаг 3. Разложить числитель.**
+
+Через `sql` сгруппировать verdict + reasoning из `merge_analysis` / `comment_analysis`. Это сразу разделяет три класса:
+
+- **NULL verdict** — нет строки в таблице → пропуск кэша → вернуться к шагу 6
+- **real NO** — LLM-судья реально посмотрел и отказал
+- **trivial NO** — fast-path: `Нет коммитов после комментария` / `Файл не менялся` / `PR declined` / `нет реакций и ответов`
+
+```bash
+.venv/bin/python pr_analytics.py sql --query "
+SELECT ma.verdict, substr(ma.reasoning,1,60) AS why, COUNT(*) AS n
+FROM pr_comments c
+JOIN pull_requests pr ON pr.repo_id=c.repo_id AND pr.pr_id=c.pr_id
+JOIN repos r ON r.id=c.repo_id
+LEFT JOIN merge_analysis ma ON ma.comment_id=c.id
+WHERE c.author='tuz_spasibo__qodo' AND c.parent_id IS NULL AND c.file_path IS NOT NULL
+  AND r.project_key='PCCFT' AND pr.state='MERGED'
+  AND pr.created_date >= strftime('%s','2026-04-20')*1000
+  AND pr.created_date <  strftime('%s','2026-05-04')*1000
+GROUP BY ma.verdict, why ORDER BY n DESC
+"
+```
+
+**Шаг 4. Сэмпл — одна строка числителя.**
+
+Из шага 3 видно что доминирует, например, trivial-NO `Нет коммитов после комментария`. Взять любой `comment_id` из этой группы (через тот же `sql` без GROUP BY, или из `find-comments`) и прогнать через `inspect-comment`:
+
+```bash
+.venv/bin/python pr_analytics.py inspect-comment 1155144
+```
+
+Покажет полный текст комментария, реакции, replies, тайминги (комментарий vs PR open/close), verdict + reasoning. Если `Created` позже `PR close` или близко к нему — гипотеза про задержку агента подтверждена на одном примере.
+
+**Шаг 5. PR-уровень — таймлайн событий.**
+
+Чтобы увидеть весь PR (а не один комментарий), запустить `pr-timeline`. Это дешёвая замена «timing SQL» — показывает open, все комментарии (с verdict-метками `[fb=no, mg=NO]`), replies, close в хронологическом порядке.
+
+```bash
+.venv/bin/python pr_analytics.py pr-timeline --pr PCCFT/sql-gbd#261
+```
+
+Типичные паттерны, которые сразу видны:
+
+- **«Агент опоздал»**: PR open → close через 1 минуту, комментарий бота +2m. PR смержили раньше чем агент успел отреагировать.
+- **«Агент стрелял по уже мерженному»**: бот комментирует через 17h после `PR merged`. Метрика правильно ставит NO — у пользователя не было шанса учесть совет.
+- **«Тред заглох»**: один thumbsup + replies без верстки агента → нет шанса на acceptance.
+
+**Шаг 6. Проверить что не stale кэш.**
+
+Если на шаге 3 видны строки с `verdict=NULL` (пропуск в `merge_analysis`/`comment_analysis`) — добить кэш. После backfill оба анализатора покрывают 100% комментариев на терминальных PR (благодаря trivial-skip), так что пропусков быть не должно:
+
+```bash
+.venv/bin/python pr_analytics.py analyze-merges \
+  --author tuz_spasibo__qodo --since 2026-04-20 --batch-size 0
+.venv/bin/python pr_analytics.py analyze-feedback \
+  --author tuz_spasibo__qodo --since 2026-04-20 --batch-size 0
+```
+
+#### Что в инструментарии ещё не хватает
+
+- **`drilldown <metric> <bucket>`** — для DSL-метрики и конкретного бакета (`merge_acceptance_rate 2026-W17/18`) распечатать построчно входящий numerator/denominator. Сейчас приходится транслировать DSL-фильтр в SQL руками. Снимет шаг 2 → шаг 3 одним вызовом.
 
 ---
 
