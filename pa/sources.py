@@ -50,13 +50,15 @@ def comments_source(vars: dict) -> list[dict]:
 
     Output rows: id, author, parent_id, file_path, severity,
                  closed_date, state, repo_id, pr_id,
-                 has_reaction (bool), has_reply (bool).
+                 has_reaction (bool), has_reply (bool),
+                 dg_gen, dg_hash, dg_run (diffgraph footer fields).
     """
     conn, (where, params) = _ctx(vars)
     if conn is None:
         return []
     rows = conn.execute(f"""
         SELECT c.id, c.author, c.parent_id, c.file_path, c.severity,
+               c.dg_gen, c.dg_hash, c.dg_run,
                pr.closed_date, pr.created_date, pr.state, pr.repo_id, pr.pr_id,
                pr.reviewers, r.project_key,
                EXISTS (SELECT 1 FROM comment_reactions cr
@@ -76,7 +78,8 @@ def analysis_source(vars: dict) -> list[dict]:
     """comment_analysis JOIN pr_comments JOIN PR. Filtered by judge_model.
 
     Output rows: comment_id, author (of comment), verdict, judge_model,
-                 closed_date, state, repo_id, pr_id.
+                 closed_date, state, repo_id, pr_id,
+                 dg_gen, dg_hash, dg_run (from the analyzed comment).
     """
     conn, (where, params) = _ctx(vars)
     if conn is None:
@@ -87,6 +90,7 @@ def analysis_source(vars: dict) -> list[dict]:
         return []
     rows = conn.execute(f"""
         SELECT ca.comment_id, c.author, ca.verdict, ca.judge_model,
+               c.dg_gen, c.dg_hash, c.dg_run,
                pr.closed_date, pr.created_date, pr.state, pr.repo_id, pr.pr_id, pr.reviewers, r.project_key
         FROM comment_analysis ca
         JOIN pr_comments c ON c.id = ca.comment_id
@@ -101,7 +105,8 @@ def merge_source(vars: dict) -> list[dict]:
     """merge_analysis (latest analyzer_version per (comment, judge)) JOIN comments JOIN PR.
 
     Output rows: comment_id, author, verdict, judge_model, analyzer_version,
-                 closed_date, state, repo_id, pr_id.
+                 closed_date, state, repo_id, pr_id,
+                 dg_gen, dg_hash, dg_run (from the analyzed comment).
     """
     conn, (where, params) = _ctx(vars)
     if conn is None:
@@ -112,7 +117,8 @@ def merge_source(vars: dict) -> list[dict]:
         return []
     rows = conn.execute(f"""
         SELECT ma.comment_id, c.author, ma.verdict, ma.judge_model,
-               ma.analyzer_version, pr.closed_date, pr.created_date, pr.state,
+               ma.analyzer_version, c.dg_gen, c.dg_hash, c.dg_run,
+               pr.closed_date, pr.created_date, pr.state,
                pr.repo_id, pr.pr_id, pr.reviewers, r.project_key
         FROM merge_analysis ma
         JOIN pr_comments c ON c.id = ma.comment_id
