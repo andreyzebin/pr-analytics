@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--type", default="box", choices=["box", "points", "trend", "json"],
                    dest="plot_type",
                    help="Chart type: box (default), points (raw values to stdout), trend (over time)")
-    p.add_argument("--period", default=None, choices=["week", "month"],
+    p.add_argument("--period", default=None, choices=["week", "biweek", "month"],
                    help="Bucketing period for trend (default: month)")
     p.add_argument("--metrics", default="cycle_time",
                    help="Comma-separated metrics for trend: cycle_time, acceptance_rate, throughput"

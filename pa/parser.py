@@ -211,10 +211,10 @@ class Parser:
         raise SyntaxError(f"unknown function {name!r}")
 
     def _call_period(self) -> Expr:
-        # period(week|month, expr)
+        # period(week|biweek|month, expr)
         period = self.expect("IDENT").value
-        if period not in ("week", "month"):
-            raise SyntaxError(f"period must be 'week' or 'month', got {period!r}")
+        if period not in ("week", "biweek", "month"):
+            raise SyntaxError(f"period must be 'week', 'biweek', or 'month', got {period!r}")
         self.expect("OP", ",")
         inner = self.expr()
         self.accept("OP", ",")  # trailing comma

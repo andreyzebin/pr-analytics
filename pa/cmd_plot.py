@@ -872,7 +872,7 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
             # Effective period: top-level Period() in the wrapped expr wins
             # over the CLI default ("month").
             eff_period = wrapped.period if isinstance(wrapped, Period) else period
-            period_label = "week" if eff_period == "week" else "month"
+            period_label = eff_period
             for label, buckets in results:
                 if not buckets:
                     continue
@@ -1143,7 +1143,8 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
         eff_period = "mixed"
     else:
         eff_period = period
-    period_label = {"week": "Week", "month": "Month", "mixed": "mixed period"}.get(
+    period_label = {"week": "Week", "biweek": "Biweek", "month": "Month",
+                    "mixed": "mixed period"}.get(
         eff_period, eff_period.capitalize() if eff_period else "Month")
     w = max(10, len(sorted_buckets) * 0.8)
 
