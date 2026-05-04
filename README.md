@@ -1177,6 +1177,49 @@ total_score = diversity × 0.35 + depth × 0.35 + noise × 0.15 + size × 0.15
 
 ## Примеры сценариев
 
+### Расследование benchmark-прогона code-review-benchmarks
+
+Когда `code-review-benchmarks` поставил scenario в FAIL, надо понять
+что именно происходило в PR — какой текст реально появился в треде,
+не сошёлся ли судья на форматных мелочах, отвечал ли агент по
+существу. Pipeline:
+
+```bash
+# 1. Закешировать свежие PR'ы из бенчмарк-репо (фильтр по дате,
+#    чтобы не вытягивать всю историю)
+source .env
+.venv/bin/python pr_analytics.py cache \
+  --repos SBLOOM/code-review-example-orderflow \
+  --since 2026-05-04
+
+# 2. Список PR'ов с заголовками (увидеть какие SCEN-NNN есть)
+.venv/bin/python pr_analytics.py find-prs \
+  --repo SBLOOM/code-review-example-orderflow \
+  --since 2026-05-04
+
+# 3. Хронология одного PR — кто что когда написал, declined ли,
+#    какие comment-id у каждой реплики
+.venv/bin/python pr_analytics.py pr-timeline \
+  --pr SBLOOM/code-review-example-orderflow#183
+
+# 4. Полный текст конкретного комментария (timeline режет по 60 chars)
+.venv/bin/python pr_analytics.py inspect-comment 1157116
+```
+
+**Что искать в выводе:**
+
+- В `inspect-comment` хвост агентского ответа всегда оканчивается
+  footer'ом вида `dg:diffgraph:<prompt-hash>:<run-id>` (если агент
+  настроен с `--comment-tag`). По нему видно — комментарий написал
+  агент, а не человек/seed-инжект бенча.
+- В `pr-timeline` смотри на ICON: 💬N значит на этот коммент есть
+  N реплик; ❤N — реакции. Цепочка `COMMENT … REPLY` показывает
+  thread'ы.
+- Если `code-review-benchmarks` пишет в один Bitbucket-аккаунт всё
+  (seed + trigger + agent reply), `pr-timeline` покажет всех как
+  одного автора. Различить можно по footer'у `dg:diffgraph:…` или
+  по тексту (`/help`, `[alice]`, etc).
+
 ### Кеш + график за квартал
 
 ```bash
