@@ -32,6 +32,7 @@ import sys
 
 from pa.cmd_acceptance import cmd_acceptance
 from pa.cmd_analyze import cmd_analyze_feedback
+from pa.cmd_dg_backfill import cmd_dg_backfill
 from pa.cmd_inspect import cmd_inspect_comment, cmd_pr_timeline
 from pa.cmd_merge_analysis import cmd_merge_analysis
 from pa.cmd_select_golden import cmd_select_golden
@@ -325,6 +326,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", default="text", choices=["text", "json"])
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
+    # ── dg-backfill ─────────────────────────────────────────────────────────
+    p = sub.add_parser("dg-backfill",
+                       help="Re-extract diffgraph footer (tag/gen/hash/run) on "
+                            "already-cached comments — useful after the regex "
+                            "is widened (e.g. to support a new --comment-tag).")
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+    p.add_argument("--all", action="store_true",
+                   help="Re-scan every comment, including those that already have "
+                        "dg_gen set. Default: only comments with dg_gen IS NULL.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Print counts without writing.")
+
     return parser
 
 
@@ -355,6 +368,7 @@ def main() -> None:
         "inspect-comment": cmd_inspect_comment,
         "pr-timeline": cmd_pr_timeline,
         "acceptance": cmd_acceptance,
+        "dg-backfill": cmd_dg_backfill,
     }
 
     fn = commands.get(args.command)
