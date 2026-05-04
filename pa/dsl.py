@@ -459,11 +459,16 @@ class Group(Expr):
     def eval_series(self, rows, period, vars):
         partitions: dict[str, list] = {}
         for r in rows:
-            partitions.setdefault(r.get(self.field, ""), []).append(r)
+            # Coerce None / non-string partition keys to "" so a column
+            # that's nullable (e.g. dg_gen on old un-tagged comments)
+            # doesn't crash sorted() on mixed types.
+            k = r.get(self.field)
+            partitions.setdefault(k if isinstance(k, str) else "", []).append(r)
         out: list[tuple[str, dict]] = []
         for g in sorted(partitions):
+            label = g or "(unset)"
             for sub_label, buckets in self.inner.eval_series(partitions[g], period, vars):
-                combined = f"{g} / {sub_label}" if sub_label else g
+                combined = f"{label} / {sub_label}" if sub_label else label
                 out.append((combined, buckets))
         return out
 

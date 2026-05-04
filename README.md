@@ -1177,6 +1177,53 @@ total_score = diversity × 0.35 + depth × 0.35 + noise × 0.15 + size × 0.15
 
 ## Примеры сценариев
 
+### Группировка метрик по версиям агента (`dg_gen` / `dg_hash`)
+
+Сравнить разные **поколения** промптов агента (или просто отделить
+агентские комменты от ручных) делается через `group(dg_gen, ...)` в DSL.
+Поля `dg_gen / dg_hash / dg_run` извлекаются из футера комментария на
+этапе `cache` и доступны в трёх источниках: `@comments`, `@analysis`, `@merge`.
+
+Если регулярка футера расширилась (например добавили `--comment-tag=qodo2`
+на стороне агента), уже закэшированные комменты остаются с `dg_gen=NULL`.
+Подтянуть их без re-fetch:
+
+```bash
+.venv/bin/python pr_analytics.py dg-backfill              # auto: только NULL
+.venv/bin/python pr_analytics.py dg-backfill --dry-run    # preview
+.venv/bin/python pr_analytics.py dg-backfill --all        # пересчитать всё
+```
+
+Простой volume-чарт: сколько комментов в неделю по каждой `dg_gen`:
+
+```bash
+.venv/bin/python pr_analytics.py plot \
+  --type points --output output/volume-by-gen.html \
+  --axes 'volume_by_gen' \
+  --var 'since=2026-04-01' \
+  --metrics '' \
+  --dsl 'volume_by_gen=
+    period(week, range(since=$since,
+      @comments(group(dg_gen,
+        count(parent_id=null, @created_date)))))'
+```
+
+Результат — N series, по одной на каждое значение `dg_gen` (плюс
+`(unset)` для не-дг-тагнутых строк, если такие попадают в выборку).
+
+**Acceptance / merge per-generation** требует чтобы `analyze-feedback` и
+`analyze-merges` уже были прогнаны на dg-tagged комментах. Если все
+строки `@analysis` / `@merge` падают в `(unset)` — значит analyze работал
+до того, как dg-tag начал записываться. Прогнать заново:
+
+```bash
+.venv/bin/python pr_analytics.py analyze-feedback --since 2026-04-13
+.venv/bin/python pr_analytics.py analyze-merges --since 2026-04-13
+```
+
+После этого `group(dg_gen, ...)` на `@analysis` / `@merge` даст
+осмысленный split.
+
 ### Расследование benchmark-прогона code-review-benchmarks
 
 Когда `code-review-benchmarks` поставил scenario в FAIL, надо понять
