@@ -227,14 +227,21 @@ def _render_pr(conn, pr_row, bot, bb_url) -> tuple[str, int, dict[str, int]]:
         (pr_row["repo_id"], pr_id, bot),
     ).fetchall()
 
-    # Generation breakdown for THIS PR
+    # Generation for THIS PR — router is hash-stable per PR, so all bot
+    # comments on a PR share one mutation in normal operation.
     gen_counts: dict[str, int] = {}
     for c in bot_comments:
         label = _gen_label(c["dg_gen"], c["dg_hash"])
         gen_counts[label] = gen_counts.get(label, 0) + 1
     if gen_counts:
-        gen_summary = ", ".join(f"`{k}`={v}" for k, v in sorted(gen_counts.items()))
-        lines.append(f"- Bot generations on this PR: {gen_summary}")
+        if len(gen_counts) == 1:
+            label, n = next(iter(gen_counts.items()))
+            lines.append(f"- Bot mutation: `{label}` ({n} inline)")
+        else:
+            # Edge case: multiple mutations on one PR (re-route mid-flight,
+            # multiple judge passes, etc.) — surface the split explicitly.
+            mix = ", ".join(f"`{k}`={v}" for k, v in sorted(gen_counts.items()))
+            lines.append(f"- ⚠ Bot mutations on this PR (mixed): {mix}")
     lines.append("")
 
     if bot_comments:
