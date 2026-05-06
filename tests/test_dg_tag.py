@@ -5,13 +5,13 @@ from pa.dg_tag import extract_dg_tag
 def test_extract_tag():
     text = "Some finding text\n\n`dg:prompts:f7917d6:ae0bd23d-8d9`"
     result = extract_dg_tag(text)
-    assert result == {"gen": "prompts", "hash": "f7917d6", "run": "ae0bd23d-8d9"}
+    assert result == {"tag": "dg", "gen": "prompts", "hash": "f7917d6", "run": "ae0bd23d-8d9"}
 
 
 def test_extract_tag_v2():
-    text = "**Title**\n\nexplanation\n\n`dg:v2:abc1234:run-001`"
+    text = "**Title**\n\nexplanation\n\n`qodo2:diffgraph:04de6f3:5536b832-971`"
     result = extract_dg_tag(text)
-    assert result == {"gen": "v2", "hash": "abc1234", "run": "run-001"}
+    assert result == {"tag": "qodo2", "gen": "diffgraph", "hash": "04de6f3", "run": "5536b832-971"}
 
 
 def test_no_tag():
@@ -24,6 +24,13 @@ def test_empty():
 
 
 def test_tag_in_middle():
-    text = "before `dg:gen:hash123:run456` after"
+    # Hash must be lowercase hex 6-16 chars to avoid false positives on
+    # `path:to:file:line`-shaped backtick spans.
+    text = "before `dg:gen:abc123:run456` after"
     result = extract_dg_tag(text)
-    assert result == {"gen": "gen", "hash": "hash123", "run": "run456"}
+    assert result == {"tag": "dg", "gen": "gen", "hash": "abc123", "run": "run456"}
+
+
+def test_rejects_non_hex_hash():
+    # "hash123" contains 'h'/'s' — not hex → must not match.
+    assert extract_dg_tag("text `dg:gen:hash123:run456` more") is None

@@ -34,6 +34,7 @@ from pa.cmd_acceptance import cmd_acceptance
 from pa.cmd_analyze import cmd_analyze_feedback
 from pa.cmd_dg_backfill import cmd_dg_backfill
 from pa.cmd_inspect import cmd_inspect_comment, cmd_pr_timeline
+from pa.cmd_pr_summary import cmd_pr_summary
 from pa.cmd_merge_analysis import cmd_merge_analysis
 from pa.cmd_select_golden import cmd_select_golden
 from pa.cmd_cache import cmd_cache
@@ -317,6 +318,33 @@ def build_parser() -> argparse.ArgumentParser:
                    help="PR identifier, e.g. PCCFT/sql-gbd#261")
     p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
 
+    # ── pr-summary ──────────────────────────────────────────────────────────
+    p = sub.add_parser("pr-summary",
+                       help="Markdown digest of one-or-many PRs (bot suggestions + "
+                            "human comments + verdicts + timing) for LLM hand-off")
+    p.add_argument("--pr", default=None, metavar="PROJ/repo#ID",
+                   help="Single PR shortcut. If set, --since/--projects/--sort ignored.")
+    p.add_argument("--bot", required=True,
+                   help="Bot author slug (e.g. tuz_spasibo__qodo)")
+    p.add_argument("--since", help="Start date (YYYY-MM-DD) — PR createdDate filter")
+    p.add_argument("--until", help="End date (YYYY-MM-DD)")
+    p.add_argument("--projects", help="Comma-separated project keys")
+    p.add_argument("--repos", help="Comma-separated PROJ/repo entries")
+    p.add_argument("--repos-file", dest="repos_file",
+                   help="File with one PROJ/repo per line")
+    p.add_argument("--state", default="MERGED",
+                   choices=["MERGED", "DECLINED", "OPEN"],
+                   help="PR state filter (default: MERGED)")
+    p.add_argument("--sort", default="latest",
+                   choices=["latest", "worst-merge", "worst-coverage", "late"],
+                   help="Selection mode: latest (default), worst-merge "
+                        "(most NO verdicts), worst-coverage (humans posted more "
+                        "than bot), late (bot last comment after close)")
+    p.add_argument("--limit", type=int, default=10,
+                   help="Max PRs to include (default: 10, 0 = unlimited)")
+    p.add_argument("--output", help="Write to file (default: stdout)")
+    p.add_argument("--db", help=f"SQLite DB path (default: {DEFAULT_DB})")
+
     # ── acceptance ──────────────────────────────────────────────────────────
     p = sub.add_parser("acceptance",
                        help="Acceptance metrics by diffgraph prompt hash")
@@ -367,6 +395,7 @@ def main() -> None:
         "analyze-merges": cmd_merge_analysis,
         "inspect-comment": cmd_inspect_comment,
         "pr-timeline": cmd_pr_timeline,
+        "pr-summary": cmd_pr_summary,
         "acceptance": cmd_acceptance,
         "dg-backfill": cmd_dg_backfill,
     }

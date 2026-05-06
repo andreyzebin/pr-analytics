@@ -29,6 +29,7 @@
   - [analyze-merges](#analyze-merges--проверка-влияния-комментариев-на-код-через-diff)
   - [inspect-comment](#inspect-comment--детали-одного-комментария)
   - [pr-timeline](#pr-timeline--хронологическая-лента-pr)
+  - [pr-summary](#pr-summary--markdown-digest-для-llm-hand-off)
   - [acceptance](#acceptance--метрики-по-поколению-агента-diffgraph)
   - [review-feedback](#review-feedback--обратная-связь-ai-агента)
   - [select-golden](#select-golden--отбор-эталонных-pr-для-бенчмарка)
@@ -967,6 +968,42 @@ Drill-down на один `comment_id`: текст, реакции, ответы,
 ```
 
 Сразу видно, например: «бот ответил через 3 дня после открытия PR, а PR смержили через 6 часов после ответа» — типичный кейс, когда `merge_acceptance` падает в ноль не из-за качества reviews, а из-за тайминга.
+
+---
+
+### `pr-summary` — markdown digest для LLM hand-off
+
+Один markdown-отчёт по одному или сразу нескольким PR (по периоду, или топ «худших» по разным критериям). Включает: bot inline suggestions с verdicts/reasoning, human ROOT inline комменты (что бот пропустил), тайминг, ссылки на PR и каждый коммент. Cache-only.
+
+```bash
+# Один PR — полный разбор
+.venv/bin/python pr_analytics.py pr-summary \
+  --pr PCCFT/java-management-api#7 \
+  --bot tuz_spasibo__qodo
+
+# Топ-10 PR с худшим merge_acceptance (больше всего NO-вердиктов)
+.venv/bin/python pr_analytics.py pr-summary \
+  --bot tuz_spasibo__qodo --projects PCCFT \
+  --since 2026-04-20 --sort worst-merge --limit 10 \
+  --output output/worst-merge.md
+
+# Топ PR где human inline-комментов больше чем у бота (coverage gap)
+.venv/bin/python pr_analytics.py pr-summary \
+  --bot tuz_spasibo__qodo --projects PCCFT \
+  --since 2026-04-20 --sort worst-coverage --limit 10
+```
+
+| Параметр | Описание |
+|---|---|
+| `--pr PROJ/repo#ID` | Один PR (если указан, остальные фильтры игнорируются) |
+| `--bot SLUG` | Author бот-слаг (обязательный) |
+| `--since` / `--until` / `--projects` / `--repos` / `--repos-file` | Фильтры выборки |
+| `--state` | `MERGED` (default), `DECLINED`, `OPEN` |
+| `--sort` | `latest` (default), `worst-merge`, `worst-coverage`, `late` |
+| `--limit` | Сколько PR включить (default: 10) |
+| `--output` | Сохранить в файл (без — в stdout) |
+
+Главный use-case: быстро собрать «самые проблемные» PR в один markdown и закинуть в LLM для генерации гипотез / кластеризации проблем. Каждый коммент и PR имеет URL — внешний инструмент (например diff-graph self-review) может пройти по ссылкам и углубить анализ.
 
 ---
 
