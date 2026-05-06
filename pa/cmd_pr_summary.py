@@ -137,7 +137,21 @@ def _lifetime_class(lifetime_min: float | None) -> str:
     return ""
 
 
-def _render_pr(conn, pr_row, bot, bb_url) -> str:
+def _is_miss(human_c, bot_comments, line_window: int = 20) -> bool:
+    """A human inline comment is a 'miss' if no bot comment exists on
+    the same file within ±line_window lines.
+    """
+    h_file = human_c["file_path"]
+    h_line = human_c["line"] or 0
+    for b in bot_comments:
+        if b["file_path"] == h_file:
+            b_line = b["line"] or 0
+            if abs(b_line - h_line) <= line_window:
+                return False
+    return True
+
+
+def _render_pr(conn, pr_row, bot, bb_url) -> tuple[str, int]:
     proj = pr_row["project_key"]
     slug = pr_row["slug"]
     pr_id = pr_row["pr_id"]
@@ -241,13 +255,23 @@ def _render_pr(conn, pr_row, bot, bb_url) -> str:
         (pr_row["repo_id"], pr_id, bot),
     ).fetchall()
 
+    misses: list = []
     if human_comments:
-        lines.append(f"### Human ROOT inline comments ({len(human_comments)})")
+        for c in human_comments:
+            if _is_miss(c, bot_comments):
+                misses.append(c)
+
+        lines.append(
+            f"### Human ROOT inline comments ({len(human_comments)}, "
+            f"likely misses: **{len(misses)}**)"
+        )
         lines.append("")
         for c in human_comments:
+            miss_tag = "  ⚠ **MISS** (no bot comment within ±20 lines)" \
+                if c in misses else ""
             lines.append(
                 f"#### `{c['file_path']}:{c['line']}` by `{c['author']}`  "
-                f"_{_ts(c['created_date'])}_"
+                f"_{_ts(c['created_date'])}_{miss_tag}"
             )
             for tl in (c["text"] or "").splitlines()[:6]:
                 lines.append(f"> {tl}")
@@ -255,7 +279,7 @@ def _render_pr(conn, pr_row, bot, bb_url) -> str:
 
     lines.append("---")
     lines.append("")
-    return "\n".join(lines)
+    return "\n".join(lines), len(misses)
 
 
 def cmd_pr_summary(args: argparse.Namespace, cfg: dict) -> None:
@@ -339,6 +363,13 @@ def cmd_pr_summary(args: argparse.Namespace, cfg: dict) -> None:
             else:
                 n_normal += 1
 
+    # Render each PR, collect miss counts in parallel
+    rendered: list[tuple[str, int]] = [
+        _render_pr(conn, pr, args.bot, bb_url) for pr in prs
+    ]
+    total_misses = sum(m for _, m in rendered)
+    pr_with_misses = sum(1 for _, m in rendered if m > 0)
+
     chunks: list[str] = []
     sort_mode = "latest" if args.pr else args.sort
     chunks.append(f"# PR summary — {len(prs)} PR(s), bot=`{args.bot}`, sort=`{sort_mode}`")
@@ -361,10 +392,22 @@ def cmd_pr_summary(args: argparse.Namespace, cfg: dict) -> None:
                 "review window; merge_acceptance is structurally suppressed for this set."
             )
         chunks.append("")
+    if total_misses:
+        chunks.append("**Likely missed by bot (humans flagged, bot didn't):**")
+        chunks.append("")
+        chunks.append(
+            f"- **{total_misses}** human inline comment(s) across **{pr_with_misses}** PR(s) "
+            f"have no bot comment within ±20 lines on the same file"
+        )
+        chunks.append(
+            "- These are quality-coverage gaps — issues the bot didn't surface "
+            "but reviewers cared enough to flag manually"
+        )
+        chunks.append("")
     chunks.append("---")
     chunks.append("")
-    for pr in prs:
-        chunks.append(_render_pr(conn, pr, args.bot, bb_url))
+    for text, _ in rendered:
+        chunks.append(text)
 
     output_text = "\n".join(chunks)
     output_path = getattr(args, "output", None)
