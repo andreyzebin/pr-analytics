@@ -21,6 +21,7 @@ import argparse
 import sys
 from datetime import datetime, timezone
 
+from pa.buckets import bucket_display, bucket_key
 from pa.config import resolve_db, resolve_url
 from pa.db import open_db
 from pa.utils import collect_repos_from_args, date_to_ms
@@ -151,7 +152,14 @@ def _is_miss(human_c, bot_comments, line_window: int = 20) -> bool:
     return True
 
 
-def _render_pr(conn, pr_row, bot, bb_url) -> tuple[str, int]:
+def _gen_label(dg_gen: str | None, dg_hash: str | None) -> str:
+    """Render a dg_gen/dg_hash pair as a single label."""
+    if not dg_gen and not dg_hash:
+        return "(unset)"
+    return f"{dg_gen or '?'}/{dg_hash or '?'}"
+
+
+def _render_pr(conn, pr_row, bot, bb_url) -> tuple[str, int, dict[str, int]]:
     proj = pr_row["project_key"]
     slug = pr_row["slug"]
     pr_id = pr_row["pr_id"]
@@ -204,7 +212,6 @@ def _render_pr(conn, pr_row, bot, bb_url) -> tuple[str, int]:
             f"  - ⚠ Humans posted **more inline comments than the bot** "
             f"(+{n_inline_human - n_inline_bot}) — possible coverage gap"
         )
-    lines.append("")
 
     # Bot inline suggestions
     bot_comments = conn.execute(
@@ -219,6 +226,16 @@ def _render_pr(conn, pr_row, bot, bb_url) -> tuple[str, int]:
            ORDER BY c.created_date""",
         (pr_row["repo_id"], pr_id, bot),
     ).fetchall()
+
+    # Generation breakdown for THIS PR
+    gen_counts: dict[str, int] = {}
+    for c in bot_comments:
+        label = _gen_label(c["dg_gen"], c["dg_hash"])
+        gen_counts[label] = gen_counts.get(label, 0) + 1
+    if gen_counts:
+        gen_summary = ", ".join(f"`{k}`={v}" for k, v in sorted(gen_counts.items()))
+        lines.append(f"- Bot generations on this PR: {gen_summary}")
+    lines.append("")
 
     if bot_comments:
         lines.append(f"### Bot inline suggestions ({len(bot_comments)})")
@@ -279,7 +296,7 @@ def _render_pr(conn, pr_row, bot, bb_url) -> tuple[str, int]:
 
     lines.append("---")
     lines.append("")
-    return "\n".join(lines), len(misses)
+    return "\n".join(lines), len(misses), gen_counts
 
 
 def cmd_pr_summary(args: argparse.Namespace, cfg: dict) -> None:
@@ -363,17 +380,67 @@ def cmd_pr_summary(args: argparse.Namespace, cfg: dict) -> None:
             else:
                 n_normal += 1
 
-    # Render each PR, collect miss counts in parallel
-    rendered: list[tuple[str, int]] = [
+    # Render each PR, collect miss counts + gen breakdown
+    rendered: list[tuple[str, int, dict]] = [
         _render_pr(conn, pr, args.bot, bb_url) for pr in prs
     ]
-    total_misses = sum(m for _, m in rendered)
-    pr_with_misses = sum(1 for _, m in rendered if m > 0)
+    total_misses = sum(m for _, m, _ in rendered)
+    pr_with_misses = sum(1 for _, m, _ in rendered if m > 0)
+
+    # Aggregate generation breakdown across all PRs
+    agg_gen: dict[str, dict] = {}  # label → {n_inline, n_prs}
+    for _, _, gen_counts in rendered:
+        for label, count in gen_counts.items():
+            entry = agg_gen.setdefault(label, {"n_inline": 0, "n_prs": 0})
+            entry["n_inline"] += count
+            entry["n_prs"] += 1
+
+    # Observed date range from the selected PRs
+    pr_opens = [pr["pr_open"] for pr in prs if pr["pr_open"]]
+    pr_closes = [pr["pr_close"] for pr in prs if pr["pr_close"]]
+    earliest_open = min(pr_opens) if pr_opens else None
+    latest_close = max(pr_closes) if pr_closes else None
+
+    def _date_only(ms: int | None) -> str:
+        if not ms:
+            return "—"
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    def _biweek_label(ms: int | None) -> str:
+        if not ms:
+            return ""
+        return bucket_display(bucket_key(ms, "biweek"))
 
     chunks: list[str] = []
     sort_mode = "latest" if args.pr else args.sort
     chunks.append(f"# PR summary — {len(prs)} PR(s), bot=`{args.bot}`, sort=`{sort_mode}`")
     chunks.append("")
+
+    # Period line — translates ISO biweek code into human-friendly dates
+    if earliest_open and latest_close:
+        first_bw_key = bucket_key(earliest_open, "biweek")
+        last_bw_key = bucket_key(latest_close, "biweek")
+        first_bw = _biweek_label(earliest_open)
+        last_bw = _biweek_label(latest_close)
+        if first_bw_key == last_bw_key:
+            period_str = f"{first_bw_key} ({first_bw})"
+        else:
+            period_str = (
+                f"{first_bw_key} ({first_bw}) — {last_bw_key} ({last_bw})"
+            )
+        chunks.append(
+            f"**Period:** {_date_only(earliest_open)} → {_date_only(latest_close)}  "
+            f"·  biweek: {period_str}"
+        )
+        if getattr(args, "since", None) or getattr(args, "until", None):
+            filt = []
+            if args.since:
+                filt.append(f"--since {args.since}")
+            if args.until:
+                filt.append(f"--until {args.until}")
+            chunks.append(f"_(filter: {', '.join(filt)})_")
+        chunks.append("")
+
     if lifetimes_min:
         median_lt = sorted(lifetimes_min)[len(lifetimes_min) // 2]
         median_str = f"{median_lt:.0f}m" if median_lt < 60 else f"{median_lt / 60:.1f}h"
@@ -404,9 +471,27 @@ def cmd_pr_summary(args: argparse.Namespace, cfg: dict) -> None:
             "but reviewers cared enough to flag manually"
         )
         chunks.append("")
+
+    if agg_gen:
+        chunks.append("**Bot generations / mutations in this digest:**")
+        chunks.append("")
+        # Sort: (unset) last, others by n_inline DESC
+        ordered = sorted(
+            agg_gen.items(),
+            key=lambda kv: (kv[0] == "(unset)", -kv[1]["n_inline"]),
+        )
+        total_inline = sum(v["n_inline"] for _, v in agg_gen.items())
+        for label, stats in ordered:
+            pct = 100 * stats["n_inline"] / total_inline if total_inline else 0
+            chunks.append(
+                f"- `{label}`: **{stats['n_prs']}** PR(s), "
+                f"**{stats['n_inline']}** inline ({pct:.0f}%)"
+            )
+        chunks.append("")
+
     chunks.append("---")
     chunks.append("")
-    for text, _ in rendered:
+    for text, _, _ in rendered:
         chunks.append(text)
 
     output_text = "\n".join(chunks)
