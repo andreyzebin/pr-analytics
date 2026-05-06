@@ -467,7 +467,7 @@ agent_comments → feedback_rate → feedback_acceptance_rate     (по фидб
 | `--dsl` | Полный DSL `'label=<dsl-expr>'`, repeatable. **Var-only режим**: семантические CLI-флаги запрещены, значения через `--var` |
 | `--var` | `'name=value'` (repeatable) — задаёт DSL-переменную `$name`. Единственный способ передать значения в `--dsl` |
 | `--period` | `month` (по умолчанию) или `week` — для trend |
-| `--axes` | `'m1,m2'` — явная группировка метрик в subplot'ы; repeatable. Метрики внутри одной группы рисуются overlay'ом |
+| `--axes` | `'m1,m2'` — явная группировка метрик в subplot'ы; repeatable. Метрики внутри одной группы рисуются overlay'ом. Суффикс `\|log` (`'m1,m2\|log'`) переключает Y-axis subplot'а на логарифмическую шкалу — нужно когда значения отличаются на порядки (например median PR lifetime от 0.1h до 300h) |
 | `--layout` | `stack` (subplot'ы, по умолчанию) или `overlay` (dual y-axis, только 2 метрики). Игнорируется при `--axes` |
 | `--split` | Режим серий (см. ниже) |
 | `--reviewer` | `include:<slug>` или `exclude:<slug>` — фильтр датасета (не разбивает) |

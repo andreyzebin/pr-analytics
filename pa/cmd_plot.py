@@ -1161,6 +1161,13 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
 
     axes_groups: list[list[str]] = []
     for spec in (getattr(args, "axes", None) or []):
+        # Optional `|log` suffix → force logarithmic Y-axis for this row.
+        # E.g. `--axes 'pr_median_lifetime_h,avg_pr_lifetime_h|log'` collapses
+        # 0.1h…300h on the same chart so short and long PRs are both visible.
+        is_log = False
+        if spec.endswith("|log"):
+            is_log = True
+            spec = spec[: -len("|log")]
         names_raw = [m.strip() for m in spec.split(",") if m.strip()]
         names = [metric_lookup.get(n, n) for n in names_raw]
         unknown = [n for n, slug in zip(names_raw, names) if slug not in requested_metrics]
@@ -1169,6 +1176,9 @@ def cmd_plot(args: argparse.Namespace, cfg: dict) -> None:
                       "--metrics, --metric, or --dsl first.", unknown)
             sys.exit(1)
         axes_groups.append(names)
+        if is_log and names:
+            # Plot code reads log_scale from first metric of the row.
+            METRICS[names[0]].log_scale = True
     if axes_groups:
         # Drop any metrics that weren't placed into a group (silently ignore —
         # user may want them computed but not shown).
