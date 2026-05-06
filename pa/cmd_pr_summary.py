@@ -124,6 +124,19 @@ def _select_prs(conn, args, since_ts, until_ts, repo_ids) -> list:
     return conn.execute(sql, select_params).fetchall()
 
 
+def _lifetime_class(lifetime_min: float | None) -> str:
+    """Tag for PR lifetime (review-intent proxy)."""
+    if lifetime_min is None:
+        return ""
+    if lifetime_min < 5:
+        return "**FOR-SHOW** (lifetime < 5m — likely auto-merged, no review intent)"
+    if lifetime_min < 30:
+        return "FAST-TRACK (lifetime < 30m — minimal review window)"
+    if lifetime_min < 60:
+        return "RUSHED (lifetime < 1h)"
+    return ""
+
+
 def _render_pr(conn, pr_row, bot, bb_url) -> str:
     proj = pr_row["project_key"]
     slug = pr_row["slug"]
@@ -144,7 +157,13 @@ def _render_pr(conn, pr_row, bot, bb_url) -> str:
     pr_open = pr_row["pr_open"]
     pr_close = pr_row["pr_close"]
     lifetime = _delta(pr_close, pr_open) if pr_open and pr_close else ""
-    lines.append(f"- Open: {_ts(pr_open)}  →  Close: {_ts(pr_close)}  (lifetime: {lifetime})")
+    lifetime_min = (pr_close - pr_open) / 60000 if pr_open and pr_close else None
+    cls = _lifetime_class(lifetime_min)
+    cls_suffix = f"  ⚠ {cls}" if cls else ""
+    lines.append(
+        f"- Open: {_ts(pr_open)}  →  Close: {_ts(pr_close)}  "
+        f"(lifetime: **{lifetime}**){cls_suffix}"
+    )
 
     bot_first = pr_row["bot_first"]
     bot_last = pr_row["bot_last"]
@@ -304,8 +323,45 @@ def cmd_pr_summary(args: argparse.Namespace, cfg: dict) -> None:
         conn.close()
         return
 
+    # Aggregate lifetime stats — exposes "for-show" PRs at a glance
+    lifetimes_min: list[float] = []
+    n_for_show = n_fast = n_rushed = n_normal = 0
+    for pr in prs:
+        if pr["pr_open"] and pr["pr_close"]:
+            lt = (pr["pr_close"] - pr["pr_open"]) / 60000
+            lifetimes_min.append(lt)
+            if lt < 5:
+                n_for_show += 1
+            elif lt < 30:
+                n_fast += 1
+            elif lt < 60:
+                n_rushed += 1
+            else:
+                n_normal += 1
+
     chunks: list[str] = []
-    chunks.append(f"# PR summary — {len(prs)} PR(s), bot=`{args.bot}`, sort=`{args.sort}`")
+    sort_mode = "latest" if args.pr else args.sort
+    chunks.append(f"# PR summary — {len(prs)} PR(s), bot=`{args.bot}`, sort=`{sort_mode}`")
+    chunks.append("")
+    if lifetimes_min:
+        median_lt = sorted(lifetimes_min)[len(lifetimes_min) // 2]
+        median_str = f"{median_lt:.0f}m" if median_lt < 60 else f"{median_lt / 60:.1f}h"
+        chunks.append("**Lifetime distribution (review-intent proxy):**")
+        chunks.append("")
+        chunks.append(
+            f"- ⚠ FOR-SHOW (< 5m): **{n_for_show}**  ·  "
+            f"FAST-TRACK (< 30m): **{n_fast}**  ·  "
+            f"RUSHED (< 1h): **{n_rushed}**  ·  "
+            f"normal: **{n_normal}**"
+        )
+        chunks.append(f"- median lifetime: **{median_str}**")
+        if n_for_show + n_fast >= len(prs) / 2:
+            chunks.append(
+                "- ⚠ **More than half of these PRs lived < 30m** — likely no real "
+                "review window; merge_acceptance is structurally suppressed for this set."
+            )
+        chunks.append("")
+    chunks.append("---")
     chunks.append("")
     for pr in prs:
         chunks.append(_render_pr(conn, pr, args.bot, bb_url))
