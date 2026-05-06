@@ -973,7 +973,7 @@ Drill-down на один `comment_id`: текст, реакции, ответы,
 
 ### `pr-summary` — markdown digest для LLM hand-off
 
-Один markdown-отчёт по одному или сразу нескольким PR (по периоду, или топ «худших» по разным критериям). Включает: bot inline suggestions с verdicts/reasoning, human ROOT inline комменты (что бот пропустил), тайминг, ссылки на PR и каждый коммент. Cache-only.
+Один markdown-отчёт по одному или сразу нескольким PR (по периоду, или топ «худших» по разным критериям). Главный use-case: быстро собрать «самые проблемные» PR в один markdown и закинуть в LLM для генерации гипотез / кластеризации проблем агента. Каждый коммент и PR имеет URL — внешний инструмент (diff-graph self-review) может пройти по ссылкам и углубить анализ. Cache-only.
 
 ```bash
 # Один PR — полный разбор
@@ -991,6 +991,11 @@ Drill-down на один `comment_id`: текст, реакции, ответы,
 .venv/bin/python pr_analytics.py pr-summary \
   --bot tuz_spasibo__qodo --projects PCCFT \
   --since 2026-04-20 --sort worst-coverage --limit 10
+
+# PR где бот опоздал (last comment после/впритык к close)
+.venv/bin/python pr_analytics.py pr-summary \
+  --bot tuz_spasibo__qodo --projects PCCFT \
+  --since 2026-04-20 --sort late --limit 10
 ```
 
 | Параметр | Описание |
@@ -1003,7 +1008,19 @@ Drill-down на один `comment_id`: текст, реакции, ответы,
 | `--limit` | Сколько PR включить (default: 10) |
 | `--output` | Сохранить в файл (без — в stdout) |
 
-Главный use-case: быстро собрать «самые проблемные» PR в один markdown и закинуть в LLM для генерации гипотез / кластеризации проблем. Каждый коммент и PR имеет URL — внешний инструмент (например diff-graph self-review) может пройти по ссылкам и углубить анализ.
+**Что в шапке digest'а:**
+- **Period** — observed range (earliest open → latest close) + biweek-метка типа `2026-W17/18 (Apr 20-May 03)`
+- **Lifetime distribution** — counts по review-intent классам: `FOR-SHOW (<5m)` / `FAST-TRACK (<30m)` / `RUSHED (<1h)` / `normal`. Если >50% PR жили <30m — флажок «merge_acceptance structurally suppressed for this set» (там физически нет окна на ревью)
+- **Likely missed by bot** — счётчик human inline комментов у которых нет ботовского рядом (±20 lines на том же файле). Прямой сигнал quality-coverage gaps
+- **Bot generations / mutations** — breakdown по `dg_gen/dg_hash`: какая мутация сколько PR/inline покрыла. При раскатке двух мутаций видно «50% на старой, 50% на новой»
+
+**Что в каждом PR-блоке:**
+- URL, state, author, тайминг (first/last bot vs open/close, флаг ⚠ если after-close)
+- Lifetime + класс (FOR-SHOW и т.д. если применимо)
+- Coverage: `bot_inline=N / human_inline=M / merge_verdicts: YES=X NO=Y`
+- **Bot mutation:** одна метка `dg_gen/dg_hash` (роутер hash-stable per PR)
+- Bot inline suggestions — каждая с severity, fb/mg-verdicts, mg-reasoning, full text/diff, comment URL
+- Human ROOT inline comments — каждая с пометкой ⚠ MISS если бот не покрыл рядом
 
 ---
 
