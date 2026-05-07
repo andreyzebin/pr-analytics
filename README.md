@@ -1481,11 +1481,44 @@ GROUP BY ma.verdict, why ORDER BY n DESC
 
 ---
 
-### Тред-путаница в ответах бота (thread crosstalk)
+### Multi-Thread Comprehension benchmark (тред-путаница)
 
 Симптом: бот отвечает в правильном треде (правильный `parent_id`), но **содержательно его ответ соответствует другому треду** на том же PR. Происходит когда у PR несколько ботовских inline-тредов и человек задаёт короткий вопрос («это серьёзная проблема?», «что ты об этом думаешь?») в одном из них — у LLM нет однозначного контекста, какой тред активен, и она склеивает по semantic similarity вместо `parent_id` chain.
 
-**Шаг 1. Найти кандидатов в кэше.**
+#### Design constraint для всех агентов
+
+Все три агента в pipeline (**dispatcher** / **reviewer** / **investigator**) должны видеть **одинаковый message-граф** PR'а:
+
+1. **Все root-комменты** (включая ботовские suggestions, человеческие inline-комменты, ботовские overview-комменты)
+2. **Все replies** с явными `parent_id` — agent должен понимать древовидную структуру
+3. **Хронологию** — порядок появления событий, чтобы reasoning «X появилось после Y» работал
+4. **Текущий триггер** — `current_comment_id`: какой именно коммент инициировал текущий запуск агента. Должен быть в промпте отдельной строкой: «Ты отвечаешь именно на это: comment#X by author@... в треде root#Y».
+5. **Активный тред выделен** — chain `current → parent → … → root` промаркирован. Прочие треды доступны как «для контекста, не отвечай на них».
+
+Без полного графа + явного маркера активного треда — LLM выбирает по semantic similarity и crosstalk неизбежен на ambiguous вопросах.
+
+#### Benchmark: 4 probe-типа
+
+| Probe | Описание | Acceptance criterion |
+|---|---|---|
+| **P1. Ambiguous** | Один и тот же короткий вопрос («что думаешь?») в 3+ разных тредах | каждый ответ content-matchает свой тред (не sibling) |
+| **P2. Reference** | Вопрос явно ссылается на parent-коммент («про эту строку — почему важно?») | ответ обсуждает параметр из parent, не из sibling |
+| **P3. Sequence** | Многоходовой тред Q→A→Q→A в одной ветке параллельно с другими тредами | каждый turn учитывает историю своей ветки, не других |
+| **P4. Disambiguation** | Два треда с похожими но разными темами + вопрос с поверхностно общими словами | ответ выбран по `parent_id`, не по lexical similarity |
+
+#### Scoring rubric (manual или LLM-judge)
+
+Для каждого ответа бота:
+- **PASS** — ответ обсуждает тему parent-треда, не использует факты только из sibling-тредов
+- **PARTIAL** — частично корректен (упоминает свой тред + дрейфует в sibling)
+- **FAIL** — содержание соответствует sibling-треду, parent-тред не обсуждается
+
+Acceptance criteria:
+- **green:** 100% PASS (зелёный свет — agent готов к prod)
+- **yellow:** ≥90% PASS, остальное PARTIAL, 0 FAIL
+- **red:** любой FAIL в P1/P2 — баг подтверждён
+
+#### Шаг 1. Найти существующие кандидаты в кэше
 
 `sql` запрос — все ботовские reply на substantive человеческие вопросы в PR где есть ≥2 inline-тредов:
 
@@ -1503,6 +1536,7 @@ SELECT
       AND sib.file_path IS NOT NULL) AS bot_inline_roots
 FROM pr_comments reply
 JOIN pr_comments parent ON parent.id=reply.parent_id
+JOIN repos r ON r.id=reply.repo_id
 WHERE reply.author='tuz_spasibo__qodo'
   AND reply.parent_id IS NOT NULL
   AND parent.author != 'tuz_spasibo__qodo'
@@ -1511,37 +1545,62 @@ WHERE reply.author='tuz_spasibo__qodo'
   AND parent.text NOT LIKE '%/help%'
   AND parent.text NOT LIKE '%/improve%'
   AND length(parent.text) > 25
-ORDER BY reply.created_date DESC
+ORDER BY bot_inline_roots DESC, reply.created_date DESC
 "
 ```
 
-**Шаг 2. Получить полный контекст PR через `pr-summary`.**
+#### Шаг 2. Собрать evidence-digest по каждому кандидату
 
 ```bash
 .venv/bin/python pr_analytics.py pr-summary \
-  --pr PROJ/repo#ID --bot tuz_spasibo__qodo --output /tmp/probe.md
+  --pr PROJ/repo#ID --bot tuz_spasibo__qodo \
+  --output output/benchmark-mtc-PROJ-repo-ID.md
 ```
 
-В digest'е видно все inline-треды (с темой) — можно глазами сверить что bot's reply содержит ту же тему что и parent comment его треда, а не другого.
+Внутри файла видно все inline-треды + reply chains — глазами сверяем content-match.
 
-**Шаг 3. Подтверждение через probe-протокол.**
+#### Шаг 3. Запустить активный probe (на чистом PR)
 
-Для воспроизведения / проверки фикса промпта — намеренная провокация на тестовом PR:
+Для baseline (текущий бот) и retest (после prompt-fix):
 
-1. Создать PR с ≥3 ботовскими inline-suggestion (или взять существующий)
-2. В каждом из 3+ тредов задать **одинаковый короткий вопрос**, без указания на конкретную тему: «что ты об этом думаешь?», «это серьёзная проблема?», «уверен?»
-3. После ответа бота — `pr-timeline --pr X` и проверить:
-   - **Локация** ответа (`parent_id` → правильный тред?) — обычно ОК
-   - **Содержание** (соответствует ли тематике именно этого треда?) — crosstalk проявляется здесь
+1. Взять PR с ≥3 ботовскими inline-suggestion (можно использовать SBLOOM/code-review-example-orderflow или benchmark-репу из `select-golden`)
+2. Применить probe P1 (ambiguous): задать одинаковый короткий вопрос в каждом треде
+3. Подождать ответы (5-10 минут)
+4. `cache --since YESTERDAY` + `pr-timeline --pr X` — собрать треды
+5. Пройти scoring rubric. Записать в `output/benchmark-mtc-PR-{date}.md`
 
-**Гипотезы для prompt-fix:**
+#### Baseline (2026-05-06)
 
-В режиме reply бот должен видеть в промпте отдельно:
-- **Активный тред** (parent → parent.parent → … → root) с явным маркером «отвечаешь именно на это»
-- **Текущий триггер**: `current_comment_id` — на какой именно коммент тебя позвали
-- **Прочие обсуждения PR** в отдельной секции «для контекста, не отвечай на них»
+Найден 1 PR с подтверждённым crosstalk: **SBLOOM/mediaplanner#81** (5 inline-тредов).
 
-После фикса — повторить probe-протокол, проверить что ответы content-matched со своим тредом.
+| Тред root | Топик | Вопрос человека | Ответ бота | Score |
+|---|---|---|---|---|
+| #1158876 (line 260) | «No duplication or conflict» | «это не коммент описывающий проблему?» | про commit-сообщения SBLOOM-142 — другой контекст | **FAIL** |
+| #1158875 (line 295) | «Spring Boot section uses plain text vs structured lists» | «это серьёзная проблема?» | про hardcoded Spring Boot 3.5.13 (это #1158872) | **FAIL** |
+
+Текущий результат: **0/2 PASS = red** (mutation `diffgraph/25839b1`).
+Evidence: `output/benchmark-mtc-sbloom-81-baseline.md`
+
+#### Что менять в промпте — для retest
+
+После prompt-fix (graph visibility + current_comment_id маркер) повторить:
+
+```bash
+# 1. Cache + analyze
+.venv/bin/python pr_analytics.py cache --since 2026-05-06 \
+  --repos SBLOOM/mediaplanner --concurrency 4
+
+# 2. Сгенерировать новый evidence-файл
+.venv/bin/python pr_analytics.py pr-summary \
+  --pr SBLOOM/mediaplanner#81 --bot tuz_spasibo__qodo \
+  --output output/benchmark-mtc-sbloom-81-{new-mutation-hash}.md
+
+# 3. Сравнить scoring построчно с baseline
+diff output/benchmark-mtc-sbloom-81-baseline.md \
+     output/benchmark-mtc-sbloom-81-{new-hash}.md
+```
+
+Acceptance: переход red → yellow или green по новому prompt-mutation hash.
 
 ---
 
