@@ -28,10 +28,12 @@ def cmd_sql(args: argparse.Namespace, cfg: dict) -> None:
         log.error("Only SELECT queries are allowed.")
         sys.exit(5)
     # Word-boundary match so identifiers like `created_date` (contains "CREATE")
-    # or `update_at` aren't false-flagged.
+    # aren't false-flagged. Negative lookahead `(?!\s*\()` exempts function
+    # calls — `replace(str, find, ...)` is a read-only SELECT scalar, while
+    # `REPLACE INTO ...` is the modifying statement.
     import re
     for forbidden in ("INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "REPLACE"):
-        if re.search(rf"\b{forbidden}\b", normalized):
+        if re.search(rf"\b{forbidden}\b(?!\s*\()", normalized):
             log.error("Modifying SQL operations are not allowed.")
             sys.exit(5)
 

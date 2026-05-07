@@ -1481,6 +1481,70 @@ GROUP BY ma.verdict, why ORDER BY n DESC
 
 ---
 
+### Тред-путаница в ответах бота (thread crosstalk)
+
+Симптом: бот отвечает в правильном треде (правильный `parent_id`), но **содержательно его ответ соответствует другому треду** на том же PR. Происходит когда у PR несколько ботовских inline-тредов и человек задаёт короткий вопрос («это серьёзная проблема?», «что ты об этом думаешь?») в одном из них — у LLM нет однозначного контекста, какой тред активен, и она склеивает по semantic similarity вместо `parent_id` chain.
+
+**Шаг 1. Найти кандидатов в кэше.**
+
+`sql` запрос — все ботовские reply на substantive человеческие вопросы в PR где есть ≥2 inline-тредов:
+
+```bash
+.venv/bin/python pr_analytics.py sql --query "
+SELECT
+  r.project_key||'/'||r.slug||'#'||reply.pr_id AS pr,
+  reply.id AS reply_id, parent.id AS parent_id,
+  parent.author AS asker,
+  substr(parent.text, 1, 90) AS question,
+  substr(reply.text, 1, 110) AS bot_answer,
+  (SELECT COUNT(*) FROM pr_comments sib
+    WHERE sib.repo_id=reply.repo_id AND sib.pr_id=reply.pr_id
+      AND sib.author='tuz_spasibo__qodo' AND sib.parent_id IS NULL
+      AND sib.file_path IS NOT NULL) AS bot_inline_roots
+FROM pr_comments reply
+JOIN pr_comments parent ON parent.id=reply.parent_id
+WHERE reply.author='tuz_spasibo__qodo'
+  AND reply.parent_id IS NOT NULL
+  AND parent.author != 'tuz_spasibo__qodo'
+  AND parent.text NOT LIKE '%/review%'
+  AND parent.text NOT LIKE '%/ask%'
+  AND parent.text NOT LIKE '%/help%'
+  AND parent.text NOT LIKE '%/improve%'
+  AND length(parent.text) > 25
+ORDER BY reply.created_date DESC
+"
+```
+
+**Шаг 2. Получить полный контекст PR через `pr-summary`.**
+
+```bash
+.venv/bin/python pr_analytics.py pr-summary \
+  --pr PROJ/repo#ID --bot tuz_spasibo__qodo --output /tmp/probe.md
+```
+
+В digest'е видно все inline-треды (с темой) — можно глазами сверить что bot's reply содержит ту же тему что и parent comment его треда, а не другого.
+
+**Шаг 3. Подтверждение через probe-протокол.**
+
+Для воспроизведения / проверки фикса промпта — намеренная провокация на тестовом PR:
+
+1. Создать PR с ≥3 ботовскими inline-suggestion (или взять существующий)
+2. В каждом из 3+ тредов задать **одинаковый короткий вопрос**, без указания на конкретную тему: «что ты об этом думаешь?», «это серьёзная проблема?», «уверен?»
+3. После ответа бота — `pr-timeline --pr X` и проверить:
+   - **Локация** ответа (`parent_id` → правильный тред?) — обычно ОК
+   - **Содержание** (соответствует ли тематике именно этого треда?) — crosstalk проявляется здесь
+
+**Гипотезы для prompt-fix:**
+
+В режиме reply бот должен видеть в промпте отдельно:
+- **Активный тред** (parent → parent.parent → … → root) с явным маркером «отвечаешь именно на это»
+- **Текущий триггер**: `current_comment_id` — на какой именно коммент тебя позвали
+- **Прочие обсуждения PR** в отдельной секции «для контекста, не отвечай на них»
+
+После фикса — повторить probe-протокол, проверить что ответы content-matched со своим тредом.
+
+---
+
 ## Коды выхода
 
 | Код | Ситуация |
